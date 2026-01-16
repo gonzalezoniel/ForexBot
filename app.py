@@ -111,10 +111,6 @@ def recent_runs(limit: int = 20):
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
-    """
-    Super simple HTML dashboard, ChaosEng style.
-    (We keep it inline so you don't need extra files.)
-    """
     last = engine.last_summary
     if not last:
         body = "<p>No runs yet. Background loop will populate this soon.</p>"
