@@ -41,7 +41,7 @@ class ChaosEngineFX:
     - Generates signals using pattern + volatility strategy
     - Applies risk management
     - Places market orders via Oanda
-    - Tracks basic history for dashboard/status endpoints
+    - Tracks history and recent trades for dashboard
     """
 
     def __init__(self):
@@ -52,6 +52,7 @@ class ChaosEngineFX:
         # Dashboard / status
         self.last_summary: Optional[Dict[str, Any]] = None
         self.recent_runs: List[Dict[str, Any]] = []
+        self.recent_trades: List[Dict[str, Any]] = []
 
         logger.info("ChaosEngine-FX initialized")
 
@@ -86,6 +87,14 @@ class ChaosEngineFX:
         if len(self.recent_runs) > 100:
             self.recent_runs = self.recent_runs[-100:]
 
+    def _record_trade(self, trade: Dict[str, Any]) -> None:
+        """
+        Keep a small recent trade history for dashboard.
+        """
+        self.recent_trades.append(trade)
+        if len(self.recent_trades) > settings.RECENT_TRADES_LIMIT:
+            self.recent_trades = self.recent_trades[-settings.RECENT_TRADES_LIMIT :]
+
     def run_once(self) -> Dict[str, Any]:
         """
         Run a single scan-execute cycle across all pairs.
@@ -101,16 +110,7 @@ class ChaosEngineFX:
             f"Run cycle - equity: {equity:.2f}, open_trades: {len(open_trades)}"
         )
 
-        # Session filter
-        if not _in_trading_session():
-            summary = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "equity": equity,
-                "actions": [],
-                "reason": "outside_session_hours",
-            }
-            self._record_run(summary)
-            return summary
+        in_session = _in_trading_session()
 
         if not self._can_trade():
             summary = {
@@ -118,6 +118,7 @@ class ChaosEngineFX:
                 "equity": equity,
                 "actions": [],
                 "reason": "daily_drawdown_limit_reached",
+                "surge_mode": False,
             }
             self._record_run(summary)
             return summary
@@ -131,28 +132,24 @@ class ChaosEngineFX:
                 "equity": equity,
                 "actions": [],
                 "reason": "max_open_trades_reached",
+                "surge_mode": False,
             }
             self._record_run(summary)
             return summary
 
-        # ---- ANALYZE ALL PAIRS FIRST (volatility + signal) ----
+        # ---- ANALYZE ALL PAIRS FIRST (volatility + signal + confidence) ----
         analyses: List[Dict[str, Any]] = []
         for pair in settings.FOREX_PAIRS[: settings.MAX_PAIRS]:
             try:
                 candles = self.client.get_candles(pair, granularity="M1", count=200)
-                signal, df = generate_signal(
+                signal, df, meta = generate_signal(
                     instrument=pair,
                     candles=candles,
                     sl_pips=settings.DEFAULT_SL_PIPS,
                     tp_pips=settings.DEFAULT_TP_PIPS,
                 )
-                # volatility score from ATR/price
-                vol_score = 0.0
-                if "atr" in df.columns and not df["atr"].isna().all():
-                    last_atr = float(df["atr"].iloc[-1])
-                    last_close = float(df["close"].iloc[-1])
-                    if last_close > 0:
-                        vol_score = last_atr / last_close
+                vol_score = float(meta.get("volatility", 0.0))
+                confidence = float(meta.get("confidence", 0.0))
 
                 analyses.append(
                     {
@@ -160,23 +157,45 @@ class ChaosEngineFX:
                         "signal": signal,
                         "df": df,
                         "volatility": vol_score,
+                        "confidence": confidence,
+                        "meta": meta,
                     }
                 )
                 logger.debug(
-                    f"{pair}: signal={signal.side} reason={signal.reason} vol={vol_score:.6f}"
+                    f"{pair}: signal={signal.side} conf={confidence:.2f} "
+                    f"reason={signal.reason} vol={vol_score:.6f}"
                 )
             except Exception as e:
                 logger.exception(f"Error analyzing {pair}: {e}")
 
-        # filter by volatility threshold
+        # Vol thresholds
+        extreme_threshold = settings.VOLATILITY_MIN_SCORE * settings.VOLATILITY_EXTREME_MULTIPLIER
+        extreme_pairs = [a for a in analyses if a["volatility"] >= extreme_threshold]
+
+        # Session handling with surge mode
+        surge_mode = False
+        if not in_session and not extreme_pairs:
+            summary = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "equity": equity,
+                "actions": [],
+                "reason": "outside_session_hours",
+                "surge_mode": False,
+            }
+            self._record_run(summary)
+            return summary
+        elif not in_session and extreme_pairs:
+            surge_mode = True
+            logger.info(
+                f"Volatility surge mode active: {len(extreme_pairs)} extreme pairs"
+            )
+
+        # filter by basic volatility threshold
         hot = [
             a
             for a in analyses
             if a["volatility"] >= settings.VOLATILITY_MIN_SCORE
         ]
-
-        # sort hottest first
-        hot.sort(key=lambda x: x["volatility"], reverse=True)
 
         if not hot:
             summary = {
@@ -184,30 +203,51 @@ class ChaosEngineFX:
                 "equity": equity,
                 "actions": [],
                 "reason": "no_pairs_above_vol_threshold",
+                "surge_mode": surge_mode,
             }
             self._record_run(summary)
             return summary
 
-        # ---- EXECUTE ON TOP-K VOLATILE PAIRS WITH REAL SIGNALS ----
-        for a in hot[: settings.VOLATILITY_TOP_K]:
+        # candidate list:
+        # - in-session: hottest normal list
+        # - surge mode outside session: only extreme ones
+        if surge_mode and not in_session:
+            candidate_list = sorted(
+                extreme_pairs, key=lambda x: x["volatility"], reverse=True
+            )
+        else:
+            candidate_list = sorted(
+                hot, key=lambda x: x["volatility"], reverse=True
+            )
+
+        # ---- EXECUTE ON TOP-K CANDIDATES WITH REAL SIGNALS ----
+        for a in candidate_list[: settings.VOLATILITY_TOP_K]:
             pair = a["pair"]
             signal: Signal = a["signal"]
             df = a["df"]
+            confidence = a["confidence"]
+            vol_score = a["volatility"]
 
             try:
-                # skip if already open on this instrument
                 if any(t["instrument"] == pair for t in open_trades):
                     logger.debug(f"Skipping {pair}: trade already open")
                     continue
 
-                if signal.side == "FLAT":
+                # require confidence
+                if signal.side == "FLAT" or confidence < settings.CONFIDENCE_MIN:
                     continue
 
                 last_price = float(df["close"].iloc[-1])
 
+                # scale risk in surge mode
+                effective_equity = equity
+                surge_for_this_pair = surge_mode and vol_score >= extreme_threshold
+                if surge_for_this_pair:
+                    effective_equity = equity * settings.EXTREME_RISK_FACTOR
+
                 units = compute_position_size(
                     instrument=pair,
-                    account_balance=equity,
+                    account_balance=effective_equity,
                     stop_loss_price=signal.stop_loss,
                     entry_price=last_price,
                 )
@@ -228,6 +268,8 @@ class ChaosEngineFX:
                     take_profit_price=signal.take_profit,
                 )
 
+                trade_time = datetime.utcnow().isoformat()
+
                 action_info = {
                     "pair": pair,
                     "side": signal.side,
@@ -236,17 +278,22 @@ class ChaosEngineFX:
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
                     "reason": signal.reason,
-                    "volatility": a["volatility"],
+                    "volatility": vol_score,
+                    "confidence": confidence,
+                    "surge_mode": surge_for_this_pair,
+                    "timestamp": trade_time,
                     "order_response": order_resp,
                 }
                 actions.append(action_info)
+                self._record_trade(action_info)
+
                 logger.info(
                     f"Opened {signal.side} {pair} units={units} "
                     f"SL={signal.stop_loss:.5f} TP={signal.take_profit:.5f} "
-                    f"vol={a['volatility']:.6f} reason={signal.reason}"
+                    f"vol={vol_score:.6f} conf={confidence:.2f} "
+                    f"surge={surge_for_this_pair} reason={signal.reason}"
                 )
 
-                # update open_trades list after placing order
                 open_trades = self.client.get_open_trades()
                 if len(open_trades) >= settings.MAX_OPEN_TRADES:
                     logger.info("Reached MAX_OPEN_TRADES during execution; stopping")
@@ -261,15 +308,12 @@ class ChaosEngineFX:
             "equity": equity,
             "actions": actions,
             "reason": reason,
+            "surge_mode": surge_mode,
         }
         self._record_run(summary)
         return summary
 
     def run_forever_blocking(self):
-        """
-        Simple blocking loop for local testing.
-        On Render we'd probably use a background task instead.
-        """
         logger.info("Starting ChaosEngine-FX loop")
         while True:
             summary = self.run_once()
