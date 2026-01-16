@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from chaosfx.engine import ChaosEngineFX
 from chaosfx.config import settings
