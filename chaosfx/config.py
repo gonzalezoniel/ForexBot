@@ -34,10 +34,20 @@ class Settings(BaseSettings):
     VOLATILITY_MIN_SCORE: float = 0.0003  # ATR/price threshold (rough)
     VOLATILITY_TOP_K: int = 4            # trade only top K most volatile symbols
 
-    # Session control (UTC: 6–22 basically covers London+NY)
+    # Volatility surge mode
+    VOLATILITY_EXTREME_MULTIPLIER: float = 1.8   # extreme threshold = MIN_SCORE * this
+    EXTREME_RISK_FACTOR: float = 0.5            # use 50% of normal size in surge mode
+
+    # Confidence scoring
+    CONFIDENCE_MIN: float = 1.5   # minimum confidence to allow a trade
+
+    # Session control (UTC: 6–22 ~ London+NY)
     SESSION_ONLY: bool = True
     SESSION_UTC_START_HOUR: int = 6
     SESSION_UTC_END_HOUR: int = 22
+
+    # Recent trades memory
+    RECENT_TRADES_LIMIT: int = 20
 
     # Oanda API
     OANDA_API_KEY: str
@@ -47,6 +57,10 @@ class Settings(BaseSettings):
     # Defaults
     DEFAULT_SL_PIPS: float = 15.0
     DEFAULT_TP_PIPS: float = 30.0
+
+    # ATR-based dynamic SL/TP (multipliers of ATR)
+    ATR_SL_MULTIPLIER: float = 1.2
+    ATR_TP_MULTIPLIER: float = 2.0
 
 
 settings = Settings()
