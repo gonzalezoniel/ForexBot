@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # Engine timing
     LOOP_INTERVAL_SECONDS: int = 60
-    MAX_PAIRS: int = 6
+    MAX_PAIRS: int = 6  # max symbols to scan per cycle
 
     # Trading universe
     FOREX_PAIRS: List[str] = [
@@ -26,9 +26,18 @@ class Settings(BaseSettings):
     ]
 
     # Risk management
-    RISK_PER_TRADE: float = 0.01
+    RISK_PER_TRADE: float = 0.01  # 1% of equity per trade
     MAX_DRAWDOWN_PER_DAY: float = 0.03
     MAX_OPEN_TRADES: int = 5
+
+    # Volatility & selection
+    VOLATILITY_MIN_SCORE: float = 0.0003  # ATR/price threshold (rough)
+    VOLATILITY_TOP_K: int = 4            # trade only top K most volatile symbols
+
+    # Session control (UTC: 6–22 basically covers London+NY)
+    SESSION_ONLY: bool = True
+    SESSION_UTC_START_HOUR: int = 6
+    SESSION_UTC_END_HOUR: int = 22
 
     # Oanda API
     OANDA_API_KEY: str
