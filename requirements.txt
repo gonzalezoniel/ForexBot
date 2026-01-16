@@ -2,6 +2,7 @@ fastapi
 uvicorn
 httpx
 pydantic
+pydantic-settings
 pandas
 numpy
 python-dotenv
