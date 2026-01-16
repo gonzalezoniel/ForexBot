@@ -27,16 +27,12 @@ def _background_loop():
         try:
             engine.run_once()
         except Exception as e:
-            # We just log; FastAPI will keep running
             print(f"[FOREXBOT LOOP ERROR] {e}")
         time.sleep(settings.LOOP_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
 def startup_event():
-    """
-    Start background trading loop when the app boots (Render included).
-    """
     global _background_thread
     if _background_thread is None or not _background_thread.is_alive():
         t = threading.Thread(target=_background_loop, daemon=True)
@@ -47,9 +43,6 @@ def startup_event():
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """
-    Stop background loop gracefully on shutdown.
-    """
     global _background_running
     _background_running = False
     print("[FOREXBOT] Background loop stopping")
@@ -71,17 +64,11 @@ def health():
 
 @app.post("/run-once")
 def run_once():
-    """
-    Manual trigger – still handy for testing.
-    """
     return engine.run_once()
 
 
 @app.get("/status")
 def status():
-    """
-    JSON status for other services / debugging.
-    """
     last = engine.last_summary
     if not last:
         return {
@@ -95,17 +82,24 @@ def status():
         "last_equity": last["equity"],
         "last_actions": len(last.get("actions", [])),
         "last_reason": last["reason"],
+        "surge_mode": last.get("surge_mode", False),
     }
 
 
 @app.get("/recent-runs")
 def recent_runs(limit: int = 20):
-    """
-    JSON history for dashboard or manual inspection.
-    """
     return {
         "count": len(engine.recent_runs[-limit:]),
         "runs": engine.recent_runs[-limit:],
+    }
+
+
+@app.get("/recent-trades")
+def recent_trades(limit: int = 20):
+    trades = engine.recent_trades[-limit:]
+    return {
+        "count": len(trades),
+        "trades": trades,
     }
 
 
@@ -113,14 +107,60 @@ def recent_runs(limit: int = 20):
 def dashboard():
     last = engine.last_summary
     if not last:
-        body = "<p>No runs yet. Background loop will populate this soon.</p>"
+        body_status = "<p>No runs yet. Background loop will populate this soon.</p>"
     else:
-        body = f"""
+        body_status = f"""
         <p><strong>Last timestamp:</strong> {last["timestamp"]}</p>
         <p><strong>Last equity:</strong> {last["equity"]:.2f}</p>
         <p><strong>Last reason:</strong> {last["reason"]}</p>
+        <p><strong>Surge mode:</strong> {last.get("surge_mode", False)}</p>
         <p><strong>Actions in last run:</strong> {len(last.get("actions", []))}</p>
         """
+
+    # Recent trades table
+    if engine.recent_trades:
+        rows = ""
+        for t in engine.recent_trades[-10:][::-1]:
+            rows += f"""
+            <tr>
+              <td>{t["timestamp"]}</td>
+              <td>{t["pair"]}</td>
+              <td>{t["side"]}</td>
+              <td>{t["units"]}</td>
+              <td>{t["entry_price"]:.5f}</td>
+              <td>{t["stop_loss"]:.5f}</td>
+              <td>{t["take_profit"]:.5f}</td>
+              <td>{t.get("volatility", 0):.6f}</td>
+              <td>{t.get("confidence", 0):.2f}</td>
+              <td>{t["reason"]}</td>
+            </tr>
+            """
+        trades_html = f"""
+        <h2 style="margin-top:24px;">Recent Trades</h2>
+        <div style="max-height:300px; overflow-y:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+          <thead>
+            <tr>
+              <th align="left">Time (UTC)</th>
+              <th align="left">Pair</th>
+              <th align="left">Side</th>
+              <th align="right">Units</th>
+              <th align="right">Entry</th>
+              <th align="right">SL</th>
+              <th align="right">TP</th>
+              <th align="right">Vol</th>
+              <th align="right">Conf</th>
+              <th align="left">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows}
+          </tbody>
+        </table>
+        </div>
+        """
+    else:
+        trades_html = "<p>No trades yet.</p>"
 
     html = f"""
     <html>
@@ -135,7 +175,7 @@ def dashboard():
             padding: 20px;
           }}
           .card {{
-            max-width: 600px;
+            max-width: 900px;
             margin: 0 auto;
             background: #111827;
             border-radius: 10px;
@@ -148,13 +188,23 @@ def dashboard():
           small {{
             color: #9ca3af;
           }}
+          th, td {{
+            padding: 4px 6px;
+            border-bottom: 1px solid #1f2937;
+          }}
+          th {{
+            position: sticky;
+            top: 0;
+            background: #111827;
+          }}
         </style>
       </head>
       <body>
         <div class="card">
           <h1>ForexBot Dashboard</h1>
           <small>Auto-refreshes every 15s</small>
-          {body}
+          {body_status}
+          {trades_html}
         </div>
       </body>
     </html>
