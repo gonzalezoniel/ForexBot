@@ -109,7 +109,7 @@ def recent_runs(limit: int = 20):
     }
 
 
-@app.get("/dashboard")
+@app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     """
     Super simple HTML dashboard, ChaosEng style.
