@@ -14,7 +14,7 @@ from chaosfx.engine import ChaosEngineFX
 
 app = FastAPI(
     title="ForexBot – Liquidity + ChaosFX",
-    version="2.0.0",
+    version="2.1.0",
     description=(
         "Combined dashboard for Liquidity Sweep strategy (EURGBP, XAUUSD, GBPCAD) "
         "and ChaosEngine-FX volatility engine."
@@ -72,7 +72,7 @@ class DummyBroker(BrokerClient):
 
 class OandaBroker(BrokerClient):
     """
-    OANDA v20 REST broker implementation for data only (no live orders yet).
+    OANDA v20 REST broker implementation.
 
     Reads config from environment:
       - OANDA_API_KEY
@@ -83,6 +83,10 @@ class OandaBroker(BrokerClient):
       EURGBP -> EUR_GBP
       XAUUSD -> XAU_USD
       GBPCAD -> GBP_CAD
+
+    For the liquidity engine we only allow REAL order placement when
+    OANDA_ENV == 'practice' (paper trading). On live, orders are skipped
+    with a warning.
     """
 
     SYMBOL_MAP = {
@@ -113,6 +117,7 @@ class OandaBroker(BrokerClient):
         self.api_key = api_key
         self.account_id = account_id
         self.base_url = base_url
+        self.env = env  # store for safety checks
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 
@@ -216,15 +221,60 @@ class OandaBroker(BrokerClient):
         take_profit: float,
     ):
         """
-        Placeholder: orders are NOT sent yet for liquidity strategy.
-        ChaosFX uses its own OandaClient for trading.
+        Send a MARKET order with SL & TP to OANDA for the liquidity engine.
+
+        Paper-only safety:
+          - If self.env != 'practice', the order is NOT sent and we log a warning.
         """
-        print(
-            f"[OandaBroker] place_order (NOT SENT): "
-            f"{symbol} {side} size={size} entry={entry} "
-            f"SL={stop_loss} TP={take_profit}"
-        )
-        return {"status": "not_sent", "detail": "Trading not enabled for this engine."}
+        # Safety: only allow real order placement on practice
+        if self.env != "practice":
+            print(
+                f"[OandaBroker] place_order blocked because OANDA_ENV={self.env!r} "
+                " (only 'practice' is allowed for liquidity engine)."
+            )
+            return {"status": "blocked", "detail": "env_not_practice"}
+
+        instrument = self._instrument(symbol)
+
+        # OANDA units: positive = buy, negative = sell
+        units = int(size)
+        if units <= 0:
+            print(f"[OandaBroker] place_order size <= 0 for {symbol}, skipping.")
+            return {"status": "skipped", "detail": "size_non_positive"}
+
+        if side.lower() == "short":
+            units = -abs(units)
+        else:
+            units = abs(units)
+
+        order = {
+            "order": {
+                "units": str(units),
+                "instrument": instrument,
+                "timeInForce": "FOK",
+                "type": "MARKET",
+                "positionFill": "DEFAULT",
+            }
+        }
+
+        # Format prices; using 5 decimals is fine for FX and XAU here
+        order["order"]["stopLossOnFill"] = {"price": f"{stop_loss:.5f}"}
+        order["order"]["takeProfitOnFill"] = {"price": f"{take_profit:.5f}"}
+
+        url = f"{self.base_url}/accounts/{self.account_id}/orders"
+
+        try:
+            resp = self.session.post(url, json=order, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            print(
+                f"[OandaBroker] ORDER SENT {symbol} {side.upper()} units={units} "
+                f"SL={stop_loss:.5f} TP={take_profit:.5f}"
+            )
+            return {"status": "sent", "oanda_response": data}
+        except Exception as e:
+            print(f"[OandaBroker] ERROR sending order for {symbol}: {e}")
+            return {"status": "error", "detail": str(e)}
 
 
 def get_broker() -> BrokerClient:
@@ -239,7 +289,10 @@ def get_broker() -> BrokerClient:
     if api_key and account_id:
         try:
             broker = OandaBroker()
-            print("[Broker] Using OandaBroker (data live, trading disabled for liquidity engine).")
+            print(
+                "[Broker] Using OandaBroker for liquidity engine "
+                "(paper trading on practice, blocked on live)."
+            )
             return broker
         except Exception as e:
             print(f"[Broker] Failed to init OandaBroker, falling back to DummyBroker: {e}")
@@ -451,7 +504,7 @@ DASHBOARD_HTML = """
 
       <div class="row">
         <div class="pill">Pairs: EURGBP · XAUUSD · GBPCAD</div>
-        <div class="pill">Mode: Signals only</div>
+        <div class="pill">Mode: Paper (OANDA practice only)</div>
       </div>
 
       <div class="label">Controls</div>
@@ -688,12 +741,13 @@ async def run_liquidity_tick():
       - OandaBroker if OANDA env vars are set & valid
       - DummyBroker otherwise
 
-    Trading is still disabled for this engine; only data is used and signals are logged.
+    When OANDA_ENV='practice', this engine will place paper trades
+    via OandaBroker.place_order. On live, orders are blocked.
     """
     now = datetime.now(timezone.utc)
 
     broker = get_broker()
-    fake_balance = 10_000.0  # used only for position size math in logs
+    fake_balance = 10_000.0  # used only for position size math
 
     signals = run_tick(
         broker_client=broker,
@@ -725,9 +779,9 @@ async def run_liquidity_tick():
             "timestamp_utc": now.isoformat(),
             "signals_found": len(signals),
             "note": (
-                "Liquidity tick executed. Check logs and /api/liquidity/signals for details. "
-                "If OANDA is configured, live market data was used. "
-                "Trading remains disabled for this engine."
+                "Liquidity tick executed. If OANDA_ENV='practice', paper trades "
+                "may have been placed on your OANDA practice account. "
+                "On live, liquidity engine orders are blocked."
             ),
         }
     )
