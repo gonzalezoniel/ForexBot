@@ -6,3 +6,5 @@ pydantic-settings
 pandas
 numpy
 python-dotenv
+requests==2.32.3
+
