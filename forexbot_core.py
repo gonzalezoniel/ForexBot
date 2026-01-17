@@ -114,7 +114,7 @@ def run_tick(
     broker_client: BrokerClient,
     balance: float,
     risk_pct_per_trade: float = 0.5,
-) -> None:
+) -> List[Signal]:
     """
     Call this from your existing main loop.
 
@@ -122,7 +122,8 @@ def run_tick(
       - Builds MyMarket wrapper
       - Calls generate_signals(...)
       - Logs the signals
-      - (Optional) places orders via broker_client.place_order
+      - Returns signals to the API/dashboard
+      - (Optional) places orders via broker_client.place_order (still disabled)
     """
     market = MyMarket(broker_client)
     now = datetime.now(timezone.utc)
@@ -131,7 +132,7 @@ def run_tick(
 
     if not signals:
         print(f"[{now.isoformat()}] No signals from liquidity sweep strategy.")
-        return
+        return []
 
     for sig in signals:
         print(
@@ -140,7 +141,7 @@ def run_tick(
             f"TP={sig.take_profit:.5f} RR={sig.rr}"
         )
 
-        # --- ORDER EXECUTION (OPTIONAL, SAFE TO LEAVE COMMENTED WHILE TESTING) ---
+        # --- ORDER EXECUTION (OPTIONAL, SAFE TO LEAVE DISABLED WHILE TESTING) ---
         # TODO: tune pip_value / volume logic per symbol + your broker
         # Example rough pip_value assumption:
         if sig.symbol == "XAUUSD":
@@ -171,3 +172,5 @@ def run_tick(
         #     take_profit=sig.take_profit,
         # )
         # print(f"[{now.isoformat()}] Order response: {order_resp}")
+
+    return signals
