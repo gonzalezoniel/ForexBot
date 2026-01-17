@@ -1,212 +1,133 @@
-from datetime import datetime
-import threading
-import time
-from typing import Optional
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import List
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
 
-from chaosfx.engine import ChaosEngineFX
-from chaosfx.config import settings
-
-app = FastAPI(title="ForexBot")
-
-engine = ChaosEngineFX()
-
-_background_thread: Optional[threading.Thread] = None
-_background_running: bool = False
+from forexbot_core import run_tick, BrokerClient, Quote
+from liquidity_sweep_strategy import Candle, Symbol
 
 
-def _background_loop():
+app = FastAPI(
+    title="ForexBot – Liquidity Sweep Strategy",
+    version="1.0.0",
+    description=(
+        "Forex day trading engine focused on EURGBP, XAUUSD, GBPCAD using "
+        "4H/1H bias + 5M liquidity sweeps and BOS confirmation."
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Dummy broker implementation (SAFE: no real orders, no real data)
+# ---------------------------------------------------------------------------
+
+
+class DummyBroker(BrokerClient):
     """
-    Background loop that runs engine.run_once() every LOOP_INTERVAL_SECONDS.
+    This is a placeholder broker implementation so the app runs safely.
+
+    - get_ohlc returns an empty list -> strategy finds no signals
+    - get_quote returns 0/0 -> spread 0 (not used because no candles)
+    - place_order only prints to console
+
+    Once you're ready to connect to OANDA/MT5, replace this with a real
+    implementation that subclasses BrokerClient and overrides the methods.
     """
-    global _background_running
-    _background_running = True
-    while _background_running:
-        try:
-            engine.run_once()
-        except Exception as e:
-            print(f"[FOREXBOT LOOP ERROR] {e}")
-        time.sleep(settings.LOOP_INTERVAL_SECONDS)
+
+    def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
+        # TODO: Replace with real broker candles.
+        # Example expected structure:
+        # return [
+        #   {
+        #       "timestamp": datetime(..., tzinfo=timezone.utc),
+        #       "open": 1.2345,
+        #       "high": 1.2350,
+        #       "low": 1.2330,
+        #       "close": 1.2340,
+        #   },
+        #   ...
+        # ]
+        return []
+
+    def get_quote(self, symbol: str) -> Quote:
+        # TODO: Replace with real broker quote.
+        # Must return Quote(bid=..., ask=...)
+        return Quote(bid=0.0, ask=0.0)
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        entry: float,
+        stop_loss: float,
+        take_profit: float,
+    ):
+        # TODO: Replace with real order placement.
+        print(
+            f"[DummyBroker] place_order called: "
+            f"{symbol} {side} size={size} entry={entry} "
+            f"SL={stop_loss} TP={take_profit}"
+        )
+        return {"status": "dummy", "detail": "No real broker is configured."}
 
 
-@app.on_event("startup")
-def startup_event():
-    global _background_thread
-    if _background_thread is None or not _background_thread.is_alive():
-        t = threading.Thread(target=_background_loop, daemon=True)
-        _background_thread = t
-        t.start()
-        print("[FOREXBOT] Background loop started")
-
-
-@app.on_event("shutdown")
-def shutdown_event():
-    global _background_running
-    _background_running = False
-    print("[FOREXBOT] Background loop stopping")
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 
 @app.get("/")
-def root():
+async def root():
+    """
+    Root endpoint for Render and browser checks.
+    Shows basic status and current UTC timestamp.
+    """
+    now = datetime.now(timezone.utc)
     return {
-        "name": "ForexBot",
+        "service": "forexbot",
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp_utc": now.isoformat(),
+        "message": "ForexBot is running. Liquidity sweep strategy is loaded.",
     }
 
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
-
-@app.post("/run-once")
-def run_once():
-    return engine.run_once()
-
-
-@app.get("/status")
-def status():
-    last = engine.last_summary
-    if not last:
-        return {
-            "status": "idle",
-            "message": "No runs executed yet",
-        }
-
-    return {
-        "status": "active",
-        "last_timestamp": last["timestamp"],
-        "last_equity": last["equity"],
-        "last_actions": len(last.get("actions", [])),
-        "last_reason": last["reason"],
-        "surge_mode": last.get("surge_mode", False),
-    }
-
-
-@app.get("/recent-runs")
-def recent_runs(limit: int = 20):
-    return {
-        "count": len(engine.recent_runs[-limit:]),
-        "runs": engine.recent_runs[-limit:],
-    }
-
-
-@app.get("/recent-trades")
-def recent_trades(limit: int = 20):
-    trades = engine.recent_trades[-limit:]
-    return {
-        "count": len(trades),
-        "trades": trades,
-    }
-
-
-@app.get("/dashboard", response_class=HTMLResponse)
-def dashboard():
-    last = engine.last_summary
-    if not last:
-        body_status = "<p>No runs yet. Background loop will populate this soon.</p>"
-    else:
-        body_status = f"""
-        <p><strong>Last timestamp:</strong> {last["timestamp"]}</p>
-        <p><strong>Last equity:</strong> {last["equity"]:.2f}</p>
-        <p><strong>Last reason:</strong> {last["reason"]}</p>
-        <p><strong>Surge mode:</strong> {last.get("surge_mode", False)}</p>
-        <p><strong>Actions in last run:</strong> {len(last.get("actions", []))}</p>
-        """
-
-    # Recent trades table
-    if engine.recent_trades:
-        rows = ""
-        for t in engine.recent_trades[-10:][::-1]:
-            rows += f"""
-            <tr>
-              <td>{t["timestamp"]}</td>
-              <td>{t["pair"]}</td>
-              <td>{t["side"]}</td>
-              <td>{t["units"]}</td>
-              <td>{t["entry_price"]:.5f}</td>
-              <td>{t["stop_loss"]:.5f}</td>
-              <td>{t["take_profit"]:.5f}</td>
-              <td>{t.get("volatility", 0):.6f}</td>
-              <td>{t.get("confidence", 0):.2f}</td>
-              <td>{t["reason"]}</td>
-            </tr>
-            """
-        trades_html = f"""
-        <h2 style="margin-top:24px;">Recent Trades</h2>
-        <div style="max-height:300px; overflow-y:auto;">
-        <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
-          <thead>
-            <tr>
-              <th align="left">Time (UTC)</th>
-              <th align="left">Pair</th>
-              <th align="left">Side</th>
-              <th align="right">Units</th>
-              <th align="right">Entry</th>
-              <th align="right">SL</th>
-              <th align="right">TP</th>
-              <th align="right">Vol</th>
-              <th align="right">Conf</th>
-              <th align="left">Reason</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows}
-          </tbody>
-        </table>
-        </div>
-        """
-    else:
-        trades_html = "<p>No trades yet.</p>"
-
-    html = f"""
-    <html>
-      <head>
-        <title>ForexBot Dashboard</title>
-        <meta http-equiv="refresh" content="15">
-        <style>
-          body {{
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #050816;
-            color: #f5f5f5;
-            padding: 20px;
-          }}
-          .card {{
-            max-width: 900px;
-            margin: 0 auto;
-            background: #111827;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-          }}
-          h1 {{
-            margin-top: 0;
-          }}
-          small {{
-            color: #9ca3af;
-          }}
-          th, td {{
-            padding: 4px 6px;
-            border-bottom: 1px solid #1f2937;
-          }}
-          th {{
-            position: sticky;
-            top: 0;
-            background: #111827;
-          }}
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h1>ForexBot Dashboard</h1>
-          <small>Auto-refreshes every 15s</small>
-          {body_status}
-          {trades_html}
-        </div>
-      </body>
-    </html>
+async def health():
     """
-    return html
+    Simple health endpoint for uptime checks.
+    """
+    return {"status": "healthy"}
+
+
+@app.post("/tick")
+async def run_strategy_tick():
+    """
+    Manually trigger one strategy evaluation tick.
+
+    For now:
+      - Uses DummyBroker (no live trading)
+      - Logs signals, if any, to stdout (Render logs)
+    """
+    now = datetime.now(timezone.utc)
+
+    broker = DummyBroker()
+    # Fake balance for size calculation; doesn't matter until we go live.
+    fake_balance = 10_000.0
+
+    # This will:
+    #   - Build a MyMarket wrapper
+    #   - Call generate_signals(...)
+    #   - Print signals to logs
+    run_tick(broker_client=broker, balance=fake_balance, risk_pct_per_trade=0.5)
+
+    return {
+        "status": "tick_completed",
+        "timestamp_utc": now.isoformat(),
+        "note": (
+            "Tick executed with DummyBroker. "
+            "No real orders were placed. Check logs for signals."
+        ),
+    }
