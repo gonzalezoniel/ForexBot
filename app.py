@@ -9,20 +9,32 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from forexbot_core import run_tick, BrokerClient, Quote
+from chaosfx.engine import ChaosEngineFX
 
 
 app = FastAPI(
-    title="ForexBot – Liquidity Sweep Strategy",
-    version="1.1.0",
+    title="ForexBot – Liquidity + ChaosFX",
+    version="2.0.0",
     description=(
-        "Forex day trading engine focused on EURGBP, XAUUSD, GBPCAD using "
-        "4H/1H bias + 5M liquidity sweeps and BOS confirmation."
+        "Combined dashboard for Liquidity Sweep strategy (EURGBP, XAUUSD, GBPCAD) "
+        "and ChaosEngine-FX volatility engine."
     ),
 )
 
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
+
+# In-memory store for liquidity sweep signals
+RECENT_LIQ_SIGNALS: List[dict] = []
+MAX_LIQ_SIGNALS = 50
+
+# Single ChaosFX engine instance
+CHAOS_ENGINE = ChaosEngineFX()
+
 
 # ---------------------------------------------------------------------------
-# Broker implementations
+# Broker implementations for Liquidity Strategy
 # ---------------------------------------------------------------------------
 
 
@@ -204,20 +216,20 @@ class OandaBroker(BrokerClient):
         take_profit: float,
     ):
         """
-        Placeholder: orders are NOT sent yet.
-        When we enable trading, we will implement a proper OANDA order here.
+        Placeholder: orders are NOT sent yet for liquidity strategy.
+        ChaosFX uses its own OandaClient for trading.
         """
         print(
             f"[OandaBroker] place_order (NOT SENT): "
             f"{symbol} {side} size={size} entry={entry} "
             f"SL={stop_loss} TP={take_profit}"
         )
-        return {"status": "not_sent", "detail": "Trading not enabled yet."}
+        return {"status": "not_sent", "detail": "Trading not enabled for this engine."}
 
 
 def get_broker() -> BrokerClient:
     """
-    Chooses broker implementation:
+    Chooses broker implementation for the liquidity strategy:
       - If OANDA env vars are set -> OandaBroker
       - Else -> DummyBroker
     """
@@ -227,7 +239,7 @@ def get_broker() -> BrokerClient:
     if api_key and account_id:
         try:
             broker = OandaBroker()
-            print("[Broker] Using OandaBroker (data live, trading disabled).")
+            print("[Broker] Using OandaBroker (data live, trading disabled for liquidity engine).")
             return broker
         except Exception as e:
             print(f"[Broker] Failed to init OandaBroker, falling back to DummyBroker: {e}")
@@ -246,7 +258,7 @@ DASHBOARD_HTML = """
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>ForexBot – Liquidity Sweep Dashboard</title>
+  <title>ForexBot – Liquidity + ChaosFX Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body {
@@ -254,29 +266,39 @@ DASHBOARD_HTML = """
       background: #050816;
       color: #e5e7eb;
       margin: 0;
-      padding: 0;
-      display: flex;
-      min-height: 100vh;
-      align-items: center;
-      justify-content: center;
+      padding: 24px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    @media (min-width: 900px) {
+      .grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
     }
     .card {
       background: rgba(15, 23, 42, 0.95);
       border-radius: 18px;
-      padding: 24px 28px;
-      max-width: 520px;
-      width: 100%;
+      padding: 20px 22px;
       box-shadow: 0 18px 45px rgba(0, 0, 0, 0.6);
       border: 1px solid rgba(148, 163, 184, 0.3);
     }
-    h1 {
-      margin: 0 0 12px;
-      font-size: 1.5rem;
+    h1, h2 {
+      margin: 0 0 8px;
+      font-size: 1.25rem;
       color: #f9fafb;
     }
+    .title-main {
+      font-size: 1.5rem;
+      margin-bottom: 4px;
+    }
     .sub {
-      margin: 0 0 16px;
-      font-size: 0.9rem;
+      margin: 0 0 12px;
+      font-size: 0.88rem;
       color: #9ca3af;
     }
     .badge {
@@ -289,7 +311,7 @@ DASHBOARD_HTML = """
       background: rgba(16, 185, 129, 0.15);
       color: #6ee7b7;
       border: 1px solid rgba(16, 185, 129, 0.35);
-      margin-bottom: 16px;
+      margin-bottom: 10px;
     }
     .badge-dot {
       width: 8px;
@@ -301,12 +323,12 @@ DASHBOARD_HTML = """
     .row {
       display: flex;
       flex-wrap: wrap;
-      gap: 12px;
-      margin-bottom: 16px;
+      gap: 8px;
+      margin-bottom: 10px;
     }
     .pill {
-      font-size: 0.8rem;
-      padding: 4px 8px;
+      font-size: 0.75rem;
+      padding: 3px 8px;
       border-radius: 999px;
       background: rgba(30, 64, 175, 0.2);
       color: #bfdbfe;
@@ -317,24 +339,27 @@ DASHBOARD_HTML = """
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: #6b7280;
+      margin-top: 8px;
       margin-bottom: 4px;
     }
-    .value {
-      font-size: 0.85rem;
-      color: #e5e7eb;
+    .status-line {
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-top: 6px;
+      min-height: 1.4em;
     }
     button {
-      margin-top: 10px;
+      margin-top: 6px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      padding: 8px 14px;
+      padding: 7px 13px;
       border-radius: 999px;
       border: none;
       background: linear-gradient(135deg, #4f46e5, #6366f1);
       color: white;
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       cursor: pointer;
       transition: transform 0.08s ease, box-shadow 0.08s ease, opacity 0.15s ease;
     }
@@ -347,11 +372,48 @@ DASHBOARD_HTML = """
       box-shadow: none;
       opacity: 0.9;
     }
-    .status-line {
-      font-size: 0.8rem;
+    .signals-list, .trades-list {
+      max-height: 220px;
+      overflow-y: auto;
+      margin-top: 6px;
+      padding-right: 4px;
+      font-size: 0.78rem;
+      border-top: 1px solid rgba(31, 41, 55, 0.7);
+      padding-top: 6px;
+    }
+    .row-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(31, 41, 55, 0.7);
+    }
+    .row-main {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .sym {
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+    .meta {
       color: #9ca3af;
-      margin-top: 8px;
-      min-height: 1.5em;
+    }
+    .tag {
+      font-weight: 500;
+      color: #a5b4fc;
+      white-space: nowrap;
+    }
+    .empty {
+      color: #6b7280;
+      font-size: 0.78rem;
+      padding-top: 4px;
+    }
+    .footer {
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: #6b7280;
     }
     a {
       color: #a5b4fc;
@@ -360,63 +422,237 @@ DASHBOARD_HTML = """
     a:hover {
       text-decoration: underline;
     }
-    .footer {
-      margin-top: 18px;
-      font-size: 0.75rem;
-      color: #6b7280;
+    .top-header {
+      max-width: 1100px;
+      margin: 0 auto 12px auto;
     }
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="top-header">
     <div class="badge">
       <span class="badge-dot"></span>
-      <span>Engine online</span>
+      <span>Engines online</span>
     </div>
-    <h1>ForexBot – Liquidity Sweep</h1>
+    <h1 class="title-main">ForexBot – Liquidity + ChaosFX</h1>
     <p class="sub">
-      EURGBP · XAUUSD · GBPCAD<br />
-      4H / 1H trend bias · 5M liquidity sweeps · BOS confirmations.
+      Left: Liquidity Sweep (EURGBP · XAUUSD · GBPCAD · 4H/1H → 5M sweeps + BOS)<br />
+      Right: ChaosEngine-FX (multi-pair volatility & confidence-based execution).
     </p>
+  </div>
 
-    <div class="row">
-      <div class="pill">Session: London / NY</div>
-      <div class="pill">RR: 1:3 – 1:5</div>
-      <div class="pill">Mode: Data live, trading off</div>
+  <div class="grid">
+    <!-- Liquidity Sweep Panel -->
+    <div class="card">
+      <h2>Liquidity Sweep Engine</h2>
+      <p class="sub">
+        HTF trend bias from 4H / 1H. Entries on 5M liquidity sweeps with BOS, RR 1:3–1:5.
+      </p>
+
+      <div class="row">
+        <div class="pill">Pairs: EURGBP · XAUUSD · GBPCAD</div>
+        <div class="pill">Mode: Signals only</div>
+      </div>
+
+      <div class="label">Controls</div>
+      <button id="liq-btn">Run Liquidity Tick ⚡</button>
+      <div id="liq-status" class="status-line"></div>
+
+      <div class="label">Recent Liquidity Signals</div>
+      <div id="liq-list" class="signals-list">
+        <div class="empty">No signals yet. Run a tick to evaluate the market.</div>
+      </div>
+
+      <div class="footer">
+        Docs: <a href="/docs" target="_blank">/docs</a> · Health: <a href="/health" target="_blank">/health</a>
+      </div>
     </div>
 
-    <div class="label">Controls</div>
-    <button id="tick-btn">
-      Run Tick
-      <span style="font-size: 0.9em;">⚡</span>
-    </button>
-    <div id="status" class="status-line"></div>
+    <!-- ChaosFX Panel -->
+    <div class="card">
+      <h2>ChaosEngine-FX</h2>
+      <p class="sub">
+        Volatility-ranked, confidence-filtered entries via ChaosFX strategy and risk engine.
+      </p>
 
-    <div class="footer">
-      <div>Docs: <a href="/docs" target="_blank">/docs</a></div>
-      <div>Health: <a href="/health" target="_blank">/health</a></div>
+      <div class="row">
+        <div class="pill">Pairs: settings.FOREX_PAIRS</div>
+        <div class="pill">Mode: Live (OANDA practice/live)</div>
+      </div>
+
+      <div class="label">Controls</div>
+      <button id="chaos-btn">Run ChaosFX Cycle ⚡</button>
+      <div id="chaos-status" class="status-line"></div>
+
+      <div class="label">Last Summary</div>
+      <div id="chaos-summary" class="status-line"></div>
+
+      <div class="label">Recent ChaosFX Trades</div>
+      <div id="chaos-trades" class="trades-list">
+        <div class="empty">No trades recorded yet.</div>
+      </div>
     </div>
   </div>
 
   <script>
-    const btn = document.getElementById("tick-btn");
-    const statusEl = document.getElementById("status");
+    const liqBtn = document.getElementById("liq-btn");
+    const chaosBtn = document.getElementById("chaos-btn");
+    const liqStatus = document.getElementById("liq-status");
+    const chaosStatus = document.getElementById("chaos-status");
+    const liqList = document.getElementById("liq-list");
+    const chaosSummary = document.getElementById("chaos-summary");
+    const chaosTrades = document.getElementById("chaos-trades");
 
-    btn.addEventListener("click", async () => {
-      statusEl.textContent = "Running tick...";
-      btn.disabled = true;
-
+    async function loadLiquiditySignals() {
       try {
-        const res = await fetch("/api/tick", { method: "POST" });
+        const res = await fetch("/api/liquidity/signals");
         const data = await res.json();
-        statusEl.textContent = data.note || "Tick completed.";
+        const signals = data.signals || [];
+
+        liqList.innerHTML = "";
+        if (!signals.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No signals yet. Run a tick to evaluate the market.";
+          liqList.appendChild(empty);
+          return;
+        }
+
+        for (const s of signals) {
+          const row = document.createElement("div");
+          row.className = "row-item";
+
+          const main = document.createElement("div");
+          main.className = "row-main";
+
+          const sym = document.createElement("div");
+          sym.className = "sym";
+          sym.textContent = `${s.symbol} · ${s.side.toUpperCase()}`;
+
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = `${s.time} · RR ${s.rr.toFixed(1)} · entry ${s.entry.toFixed(5)}`;
+
+          main.appendChild(sym);
+          main.appendChild(meta);
+
+          const tag = document.createElement("div");
+          tag.className = "tag";
+          tag.textContent = s.comment || "";
+
+          row.appendChild(main);
+          row.appendChild(tag);
+
+          liqList.appendChild(row);
+        }
       } catch (err) {
         console.error(err);
-        statusEl.textContent = "Error running tick. Check logs.";
+      }
+    }
+
+    async function loadChaosfxStatus() {
+      try {
+        const res = await fetch("/api/chaosfx/status");
+        const data = await res.json();
+
+        const last = data.last_summary;
+        const trades = data.recent_trades || [];
+
+        // Summary
+        if (!last) {
+          chaosSummary.textContent = "No runs yet.";
+        } else {
+          const actionsCount = (last.actions || []).length;
+          chaosSummary.textContent =
+            `Equity: ${Number(last.equity || 0).toFixed(2)} · ` +
+            `Reason: ${last.reason || "n/a"} · ` +
+            `Actions: ${actionsCount} · ` +
+            `Surge: ${last.surge_mode ? "ON" : "OFF"}`;
+        }
+
+        // Trades
+        chaosTrades.innerHTML = "";
+        if (!trades.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No trades recorded yet.";
+          chaosTrades.appendChild(empty);
+          return;
+        }
+
+        for (const t of trades.slice().reverse()) {
+          const row = document.createElement("div");
+          row.className = "row-item";
+
+          const main = document.createElement("div");
+          main.className = "row-main";
+
+          const sym = document.createElement("div");
+          sym.className = "sym";
+          sym.textContent = `${t.pair} · ${t.side}`;
+
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent =
+            `${t.timestamp || ""} · vol ${Number(t.volatility || 0).toFixed(4)} ` +
+            `· conf ${Number(t.confidence || 0).toFixed(2)} ` +
+            `· entry ${Number(t.entry_price || 0).toFixed(5)}`;
+
+          main.appendChild(sym);
+          main.appendChild(meta);
+
+          const tag = document.createElement("div");
+          tag.className = "tag";
+          tag.textContent = t.reason || "";
+
+          row.appendChild(main);
+          row.appendChild(tag);
+          chaosTrades.appendChild(row);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    liqBtn.addEventListener("click", async () => {
+      liqStatus.textContent = "Running liquidity tick...";
+      liqBtn.disabled = true;
+      try {
+        const res = await fetch("/api/liquidity/tick", { method: "POST" });
+        const data = await res.json();
+        liqStatus.textContent =
+          `Signals: ${data.signals_found} · ` +
+          (data.note || "Tick completed.");
+        await loadLiquiditySignals();
+      } catch (err) {
+        console.error(err);
+        liqStatus.textContent = "Error running tick. Check logs.";
       } finally {
-        btn.disabled = false;
+        liqBtn.disabled = false;
       }
     });
+
+    chaosBtn.addEventListener("click", async () => {
+      chaosStatus.textContent = "Running ChaosFX cycle...";
+      chaosBtn.disabled = true;
+      try {
+        const res = await fetch("/api/chaosfx/run_once", { method: "POST" });
+        const data = await res.json();
+        chaosStatus.textContent =
+          `Reason: ${data.reason || "completed"} · ` +
+          `Actions: ${(data.actions || []).length}`;
+        await loadChaosfxStatus();
+      } catch (err) {
+        console.error(err);
+        chaosStatus.textContent = "Error running ChaosFX. Check logs.";
+      } finally {
+        chaosBtn.disabled = false;
+      }
+    });
+
+    // Initial load
+    loadLiquiditySignals();
+    loadChaosfxStatus();
   </script>
 </body>
 </html>
@@ -430,7 +666,7 @@ DASHBOARD_HTML = """
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """HTML dashboard for the bot."""
+    """Combined HTML dashboard for Liquidity Sweep + ChaosFX."""
     return HTMLResponse(content=DASHBOARD_HTML)
 
 
@@ -440,36 +676,106 @@ async def health():
     return JSONResponse({"status": "healthy"})
 
 
-@app.post("/api/tick", response_class=JSONResponse)
-async def run_strategy_tick():
+# ------------------- Liquidity Sweep endpoints -----------------------------
+
+
+@app.post("/api/liquidity/tick", response_class=JSONResponse)
+async def run_liquidity_tick():
     """
-    Manually trigger one strategy evaluation tick.
+    Manually trigger one liquidity strategy evaluation tick.
 
     Uses:
       - OandaBroker if OANDA env vars are set & valid
       - DummyBroker otherwise
 
-    Trading is still disabled; only data is used and signals are logged.
+    Trading is still disabled for this engine; only data is used and signals are logged.
     """
     now = datetime.now(timezone.utc)
 
     broker = get_broker()
-    fake_balance = 10_000.0  # used only for position size math
+    fake_balance = 10_000.0  # used only for position size math in logs
 
-    run_tick(
+    signals = run_tick(
         broker_client=broker,
         balance=fake_balance,
         risk_pct_per_trade=0.5,
     )
 
+    # Store in memory
+    for sig in signals:
+        RECENT_LIQ_SIGNALS.append(
+            {
+                "time": now.strftime("%Y-%m-%d %H:%M"),
+                "symbol": sig.symbol,
+                "side": sig.side,
+                "entry": float(sig.entry),
+                "stop_loss": float(sig.stop_loss),
+                "take_profit": float(sig.take_profit),
+                "rr": float(sig.rr),
+                "comment": sig.comment,
+            }
+        )
+
+    if len(RECENT_LIQ_SIGNALS) > MAX_LIQ_SIGNALS:
+        del RECENT_LIQ_SIGNALS[:-MAX_LIQ_SIGNALS]
+
     return JSONResponse(
         {
             "status": "tick_completed",
             "timestamp_utc": now.isoformat(),
+            "signals_found": len(signals),
             "note": (
-                "Tick executed. Check logs for signals. "
+                "Liquidity tick executed. Check logs and /api/liquidity/signals for details. "
                 "If OANDA is configured, live market data was used. "
-                "Trading remains disabled."
+                "Trading remains disabled for this engine."
             ),
+        }
+    )
+
+
+@app.get("/api/liquidity/signals", response_class=JSONResponse)
+async def get_liquidity_signals():
+    """
+    Return recent liquidity sweep signals in reverse-chronological order.
+    """
+    return JSONResponse({"signals": list(reversed(RECENT_LIQ_SIGNALS))})
+
+
+# Backwards-compatible alias for old /api/tick
+@app.post("/api/tick", response_class=JSONResponse)
+async def legacy_run_strategy_tick():
+    """Alias to /api/liquidity/tick for backward compatibility."""
+    return await run_liquidity_tick()
+
+
+# ------------------- ChaosFX endpoints -------------------------------------
+
+
+@app.post("/api/chaosfx/run_once", response_class=JSONResponse)
+async def run_chaosfx_once():
+    """
+    Run a single ChaosEngine-FX cycle.
+
+    NOTE:
+      - ChaosFX uses its own OandaClient + settings from chaosfx.config.
+      - It may place real orders on your OANDA account depending on settings.
+    """
+    summary = CHAOS_ENGINE.run_once()
+    return JSONResponse(summary)
+
+
+@app.get("/api/chaosfx/status", response_class=JSONResponse)
+async def chaosfx_status():
+    """
+    Returns ChaosFX current status, including:
+      - last_summary
+      - recent_runs
+      - recent_trades
+    """
+    return JSONResponse(
+        {
+            "last_summary": CHAOS_ENGINE.last_summary,
+            "recent_runs": CHAOS_ENGINE.recent_runs,
+            "recent_trades": CHAOS_ENGINE.recent_trades,
         }
     )
