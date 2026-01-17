@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from datetime import datetime, timezone
 from typing import List
 
@@ -14,7 +15,7 @@ from chaosfx.engine import ChaosEngineFX
 
 app = FastAPI(
     title="ForexBot – Liquidity + ChaosFX",
-    version="2.1.0",
+    version="2.2.0",
     description=(
         "Combined dashboard for Liquidity Sweep strategy (EURGBP, XAUUSD, GBPCAD) "
         "and ChaosEngine-FX volatility engine."
@@ -25,12 +26,13 @@ app = FastAPI(
 # Global state
 # ---------------------------------------------------------------------------
 
-# In-memory store for liquidity sweep signals
 RECENT_LIQ_SIGNALS: List[dict] = []
 MAX_LIQ_SIGNALS = 50
 
-# Single ChaosFX engine instance
 CHAOS_ENGINE = ChaosEngineFX()
+
+# background task handle
+_bg_task: asyncio.Task | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -39,14 +41,6 @@ CHAOS_ENGINE = ChaosEngineFX()
 
 
 class DummyBroker(BrokerClient):
-    """
-    Safe broker used when OANDA credentials are not configured or fail.
-
-    - get_ohlc returns an empty list -> strategy finds no signals
-    - get_quote returns 0/0 -> spread 0 (not used because no candles)
-    - place_order only prints to console
-    """
-
     def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
         return []
 
@@ -64,31 +58,12 @@ class DummyBroker(BrokerClient):
     ):
         print(
             f"[DummyBroker] place_order called: "
-            f"{symbol} {side} size={size} entry={entry} "
-            f"SL={stop_loss} TP={take_profit}"
+            f"{symbol} {side} size={size} entry={entry} SL={stop_loss} TP={take_profit}"
         )
         return {"status": "dummy", "detail": "No real broker is configured."}
 
 
 class OandaBroker(BrokerClient):
-    """
-    OANDA v20 REST broker implementation.
-
-    Reads config from environment:
-      - OANDA_API_KEY
-      - OANDA_ACCOUNT_ID
-      - OANDA_ENV = 'practice' or 'live' (default: practice)
-
-    Instruments mapping:
-      EURGBP -> EUR_GBP
-      XAUUSD -> XAU_USD
-      GBPCAD -> GBP_CAD
-
-    For the liquidity engine we only allow REAL order placement when
-    OANDA_ENV == 'practice' (paper trading). On live, orders are skipped
-    with a warning.
-    """
-
     SYMBOL_MAP = {
         "EURGBP": "EUR_GBP",
         "XAUUSD": "XAU_USD",
@@ -117,7 +92,7 @@ class OandaBroker(BrokerClient):
         self.api_key = api_key
         self.account_id = account_id
         self.base_url = base_url
-        self.env = env  # store for safety checks
+        self.env = env
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 
@@ -133,11 +108,7 @@ class OandaBroker(BrokerClient):
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 
         url = f"{self.base_url}/instruments/{instrument}/candles"
-        params = {
-            "granularity": granularity,
-            "count": limit,
-            "price": "M",  # mid prices
-        }
+        params = {"granularity": granularity, "count": limit, "price": "M"}
 
         try:
             resp = self.session.get(url, params=params, timeout=10)
@@ -151,13 +122,11 @@ class OandaBroker(BrokerClient):
         candles: List[dict] = []
 
         for c in candles_raw:
-            # skip incomplete candles
             if not c.get("complete", False):
                 continue
             t = c.get("time")
             if not t:
                 continue
-            # OANDA time format: '2025-01-16T12:00:00.000000000Z'
             t = t.replace("Z", "+00:00")
             try:
                 ts = datetime.fromisoformat(t)
@@ -173,15 +142,7 @@ class OandaBroker(BrokerClient):
             except Exception:
                 continue
 
-            candles.append(
-                {
-                    "timestamp": ts,
-                    "open": o,
-                    "high": h,
-                    "low": l,
-                    "close": cl,
-                }
-            )
+            candles.append({"timestamp": ts, "open": o, "high": h, "low": l, "close": cl})
 
         return candles
 
@@ -220,26 +181,16 @@ class OandaBroker(BrokerClient):
         stop_loss: float,
         take_profit: float,
     ):
-        """
-        Send a MARKET order with SL & TP to OANDA for the liquidity engine.
-
-        Paper-only safety:
-          - If self.env != 'practice', the order is NOT sent and we log a warning.
-        """
-        # Safety: only allow real order placement on practice
+        # Safety: liquidity engine orders only allowed on practice
         if self.env != "practice":
-            print(
-                f"[OandaBroker] place_order blocked because OANDA_ENV={self.env!r} "
-                " (only 'practice' is allowed for liquidity engine)."
-            )
+            print(f"[OandaBroker] place_order blocked: OANDA_ENV={self.env!r}")
             return {"status": "blocked", "detail": "env_not_practice"}
 
         instrument = self._instrument(symbol)
 
-        # OANDA units: positive = buy, negative = sell
-        units = int(size)
+        units = int(round(size))
         if units <= 0:
-            print(f"[OandaBroker] place_order size <= 0 for {symbol}, skipping.")
+            print(f"[OandaBroker] place_order size<=0 for {symbol}, skipping.")
             return {"status": "skipped", "detail": "size_non_positive"}
 
         if side.lower() == "short":
@@ -254,23 +205,17 @@ class OandaBroker(BrokerClient):
                 "timeInForce": "FOK",
                 "type": "MARKET",
                 "positionFill": "DEFAULT",
+                "stopLossOnFill": {"price": f"{stop_loss:.5f}"},
+                "takeProfitOnFill": {"price": f"{take_profit:.5f}"},
             }
         }
 
-        # Format prices; using 5 decimals is fine for FX and XAU here
-        order["order"]["stopLossOnFill"] = {"price": f"{stop_loss:.5f}"}
-        order["order"]["takeProfitOnFill"] = {"price": f"{take_profit:.5f}"}
-
         url = f"{self.base_url}/accounts/{self.account_id}/orders"
-
         try:
             resp = self.session.post(url, json=order, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            print(
-                f"[OandaBroker] ORDER SENT {symbol} {side.upper()} units={units} "
-                f"SL={stop_loss:.5f} TP={take_profit:.5f}"
-            )
+            print(f"[OandaBroker] ORDER SENT {symbol} {side.upper()} units={units}")
             return {"status": "sent", "oanda_response": data}
         except Exception as e:
             print(f"[OandaBroker] ERROR sending order for {symbol}: {e}")
@@ -278,27 +223,98 @@ class OandaBroker(BrokerClient):
 
 
 def get_broker() -> BrokerClient:
-    """
-    Chooses broker implementation for the liquidity strategy:
-      - If OANDA env vars are set -> OandaBroker
-      - Else -> DummyBroker
-    """
     api_key = os.getenv("OANDA_API_KEY", "").strip()
     account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
 
     if api_key and account_id:
         try:
             broker = OandaBroker()
-            print(
-                "[Broker] Using OandaBroker for liquidity engine "
-                "(paper trading on practice, blocked on live)."
-            )
+            print("[Broker] Using OandaBroker for liquidity engine (practice-only orders).")
             return broker
         except Exception as e:
-            print(f"[Broker] Failed to init OandaBroker, falling back to DummyBroker: {e}")
+            print(f"[Broker] Failed to init OandaBroker; falling back to DummyBroker: {e}")
 
     print("[Broker] Using DummyBroker (no real data).")
     return DummyBroker()
+
+
+# ---------------------------------------------------------------------------
+# Background auto-run loop
+# ---------------------------------------------------------------------------
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+LIQ_AUTORUN_ENABLED = _env_bool("LIQ_AUTORUN_ENABLED", True)
+CHAOS_AUTORUN_ENABLED = _env_bool("CHAOS_AUTORUN_ENABLED", True)
+
+# intervals (seconds)
+LIQ_TICK_INTERVAL = int(os.getenv("LIQ_TICK_INTERVAL_SECONDS", "300"))   # 5 min
+CHAOS_TICK_INTERVAL = int(os.getenv("CHAOS_TICK_INTERVAL_SECONDS", "60"))  # 1 min
+
+
+async def _autorun_loop():
+    """
+    Runs forever inside the web process:
+      - liquidity tick every LIQ_TICK_INTERVAL
+      - chaosfx cycle every CHAOS_TICK_INTERVAL
+    """
+    print(
+        f"[AutoRun] enabled: liquidity={LIQ_AUTORUN_ENABLED} chaosfx={CHAOS_AUTORUN_ENABLED} "
+        f"intervals: liq={LIQ_TICK_INTERVAL}s chaos={CHAOS_TICK_INTERVAL}s"
+    )
+
+    next_liq = 0.0
+    next_chaos = 0.0
+
+    while True:
+        now = asyncio.get_event_loop().time()
+
+        try:
+            if LIQ_AUTORUN_ENABLED and now >= next_liq:
+                print("[AutoRun] Running liquidity tick...")
+                broker = get_broker()
+                fake_balance = 10_000.0
+                sigs = run_tick(broker_client=broker, balance=fake_balance, risk_pct_per_trade=0.5)
+
+                ts = datetime.now(timezone.utc)
+                for sig in sigs:
+                    RECENT_LIQ_SIGNALS.append(
+                        {
+                            "time": ts.strftime("%Y-%m-%d %H:%M"),
+                            "symbol": sig.symbol,
+                            "side": sig.side,
+                            "entry": float(sig.entry),
+                            "stop_loss": float(sig.stop_loss),
+                            "take_profit": float(sig.take_profit),
+                            "rr": float(sig.rr),
+                            "comment": sig.comment,
+                        }
+                    )
+                if len(RECENT_LIQ_SIGNALS) > MAX_LIQ_SIGNALS:
+                    del RECENT_LIQ_SIGNALS[:-MAX_LIQ_SIGNALS]
+
+                next_liq = now + LIQ_TICK_INTERVAL
+
+            if CHAOS_AUTORUN_ENABLED and now >= next_chaos:
+                print("[AutoRun] Running ChaosFX cycle...")
+                CHAOS_ENGINE.run_once()
+                next_chaos = now + CHAOS_TICK_INTERVAL
+
+        except Exception as e:
+            print(f"[AutoRun] ERROR: {e}")
+
+        await asyncio.sleep(2)
+
+
+@app.on_event("startup")
+async def _startup():
+    global _bg_task
+    _bg_task = asyncio.create_task(_autorun_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -712,42 +728,26 @@ DASHBOARD_HTML = """
 """
 
 
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
-
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Combined HTML dashboard for Liquidity Sweep + ChaosFX."""
     return HTMLResponse(content=DASHBOARD_HTML)
 
 
 @app.get("/health", response_class=JSONResponse)
 async def health():
-    """Simple health endpoint for uptime checks."""
     return JSONResponse({"status": "healthy"})
-
-
-# ------------------- Liquidity Sweep endpoints -----------------------------
 
 
 @app.post("/api/liquidity/tick", response_class=JSONResponse)
 async def run_liquidity_tick():
-    """
-    Manually trigger one liquidity strategy evaluation tick.
-
-    Uses:
-      - OandaBroker if OANDA env vars are set & valid
-      - DummyBroker otherwise
-
-    When OANDA_ENV='practice', this engine will place paper trades
-    via OandaBroker.place_order. On live, orders are blocked.
-    """
     now = datetime.now(timezone.utc)
-
     broker = get_broker()
-    fake_balance = 10_000.0  # used only for position size math
+    fake_balance = 10_000.0
 
     signals = run_tick(
         broker_client=broker,
@@ -755,7 +755,6 @@ async def run_liquidity_tick():
         risk_pct_per_trade=0.5,
     )
 
-    # Store in memory
     for sig in signals:
         RECENT_LIQ_SIGNALS.append(
             {
@@ -769,7 +768,6 @@ async def run_liquidity_tick():
                 "comment": sig.comment,
             }
         )
-
     if len(RECENT_LIQ_SIGNALS) > MAX_LIQ_SIGNALS:
         del RECENT_LIQ_SIGNALS[:-MAX_LIQ_SIGNALS]
 
@@ -779,9 +777,9 @@ async def run_liquidity_tick():
             "timestamp_utc": now.isoformat(),
             "signals_found": len(signals),
             "note": (
-                "Liquidity tick executed. If OANDA_ENV='practice', paper trades "
-                "may have been placed on your OANDA practice account. "
-                "On live, liquidity engine orders are blocked."
+                "Liquidity tick executed. If OANDA_ENV='practice', paper trades may "
+                "have been placed on your OANDA practice account. On live, liquidity "
+                "engine orders are blocked."
             ),
         }
     )
@@ -789,43 +787,17 @@ async def run_liquidity_tick():
 
 @app.get("/api/liquidity/signals", response_class=JSONResponse)
 async def get_liquidity_signals():
-    """
-    Return recent liquidity sweep signals in reverse-chronological order.
-    """
     return JSONResponse({"signals": list(reversed(RECENT_LIQ_SIGNALS))})
-
-
-# Backwards-compatible alias for old /api/tick
-@app.post("/api/tick", response_class=JSONResponse)
-async def legacy_run_strategy_tick():
-    """Alias to /api/liquidity/tick for backward compatibility."""
-    return await run_liquidity_tick()
-
-
-# ------------------- ChaosFX endpoints -------------------------------------
 
 
 @app.post("/api/chaosfx/run_once", response_class=JSONResponse)
 async def run_chaosfx_once():
-    """
-    Run a single ChaosEngine-FX cycle.
-
-    NOTE:
-      - ChaosFX uses its own OandaClient + settings from chaosfx.config.
-      - It may place real orders on your OANDA account depending on settings.
-    """
     summary = CHAOS_ENGINE.run_once()
     return JSONResponse(summary)
 
 
 @app.get("/api/chaosfx/status", response_class=JSONResponse)
 async def chaosfx_status():
-    """
-    Returns ChaosFX current status, including:
-      - last_summary
-      - recent_runs
-      - recent_trades
-    """
     return JSONResponse(
         {
             "last_summary": CHAOS_ENGINE.last_summary,
