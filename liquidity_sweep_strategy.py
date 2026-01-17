@@ -41,26 +41,29 @@ class LiquiditySweepConfig:
 
 # --- Pair-specific configuration -------------------------------------------
 
+# Tweaked for:
+# - slightly lower wick requirement (more sweeps)
+# - more attainable RR (1.8–2.5 area instead of 3–5)
 PAIR_CONFIG: Dict[Symbol, LiquiditySweepConfig] = {
     "EURGBP": LiquiditySweepConfig(
         max_spread=2.5,
-        min_wick_ratio=0.4,
-        rr_default=3.0,
-        rr_premium=3.0,  # EURGBP less likely to extend huge, keep realistic
+        min_wick_ratio=0.35,   # was 0.40 – easier to qualify a sweep
+        rr_default=2.0,        # was 3.0 – more realistic reaction target
+        rr_premium=2.5,        # was 3.0
         asian_session=(time(0, 0), time(7, 0)),
     ),
     "XAUUSD": LiquiditySweepConfig(
         max_spread=35.0,
-        min_wick_ratio=0.35,
-        rr_default=4.0,
-        rr_premium=5.0,
+        min_wick_ratio=0.30,   # was 0.35 – XAU often wicks aggressively
+        rr_default=2.5,        # was 4.0
+        rr_premium=3.0,        # was 5.0
         asian_session=(time(0, 0), time(7, 0)),
     ),
     "GBPCAD": LiquiditySweepConfig(
         max_spread=4.0,
-        min_wick_ratio=0.4,
-        rr_default=3.0,
-        rr_premium=4.0,
+        min_wick_ratio=0.35,   # was 0.40
+        rr_default=2.0,        # was 3.0
+        rr_premium=2.5,        # was 4.0
         asian_session=(time(0, 0), time(7, 0)),
     ),
 }
@@ -175,7 +178,10 @@ def _previous_day_high_low(candles_5m: List[Candle]) -> Optional[tuple[float, fl
     return high, low
 
 
-def _equal_levels(candles_5m: List[Candle], threshold_ratio: float = 0.15) -> List[LiquidityLevel]:
+def _equal_levels(
+    candles_5m: List[Candle],
+    threshold_ratio: float = 0.20,  # was 0.15 – slightly looser clustering
+) -> List[LiquidityLevel]:
     """Find very rough equal highs/lows using an ATR-ish tolerance."""
     if len(candles_5m) < 10:
         return []
@@ -192,12 +198,16 @@ def _equal_levels(candles_5m: List[Candle], threshold_ratio: float = 0.15) -> Li
     # group highs
     for i in range(1, len(highs)):
         if abs(highs[i] - highs[i - 1]) <= tol:
-            levels.append(LiquidityLevel(price=(highs[i] + highs[i - 1]) / 2.0, kind="EQH"))
+            levels.append(
+                LiquidityLevel(price=(highs[i] + highs[i - 1]) / 2.0, kind="EQH")
+            )
 
     # group lows
     for i in range(1, len(lows)):
         if abs(lows[i] - lows[i - 1]) <= tol:
-            levels.append(LiquidityLevel(price=(lows[i] + lows[i - 1]) / 2.0, kind="EQL"))
+            levels.append(
+                LiquidityLevel(price=(lows[i] + lows[i - 1]) / 2.0, kind="EQL")
+            )
 
     return levels
 
@@ -261,7 +271,13 @@ def _confirm_bos(
     candles_5m: List[Candle],
     sweep: SweepResult,
 ) -> bool:
-    """Very simple BOS: break of minor swing in direction of 'side' after the sweep candle."""
+    """
+    Very simple BOS: break of minor swing in direction of 'side' after the sweep candle.
+
+    Loosened slightly to increase hit rate:
+      - shorter lookback window (3 instead of 5)
+      - allow wick-based break (high/low), not only close
+    """
     if len(candles_5m) < 10:
         return False
 
@@ -272,21 +288,22 @@ def _confirm_bos(
         return False
 
     # look back a few bars before sweep to define a minor structure level
-    lookback = candles_5m[max(0, idx - 5) : idx]
+    lookback = candles_5m[max(0, idx - 3) : idx]  # was 5
 
     if sweep.side == "long":
         if not lookback:
             return False
         minor_high = max(c.high for c in lookback)
         for c in candles_5m[idx + 1 :]:
-            if c.close > minor_high:
+            # allow wick break, not just close break
+            if c.high > minor_high:
                 return True
     else:  # short
         if not lookback:
             return False
         minor_low = min(c.low for c in lookback)
         for c in candles_5m[idx + 1 :]:
-            if c.close < minor_low:
+            if c.low < minor_low:
                 return True
 
     return False
