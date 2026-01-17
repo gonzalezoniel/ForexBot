@@ -20,6 +20,11 @@ from liquidity_sweep_strategy import (
 # If False, it will remain signal-only.
 LIQUIDITY_TRADING_ENABLED: bool = True
 
+# Safety caps / minimums for OANDA units (paper)
+MIN_UNITS_FX = 1000       # 1k units minimum for FX pairs
+MIN_UNITS_XAU = 1         # 1 unit minimum for XAU_USD (paper)
+MAX_UNITS = 200_000       # cap to prevent crazy sizing bugs
+
 
 @dataclass
 class Quote:
@@ -29,9 +34,9 @@ class Quote:
 
 class BrokerClient:
     """
-    Placeholder interface for your real broker client.
+    Broker interface used by the liquidity strategy.
 
-    Implement these methods in your concrete broker (see OandaBroker in app.py).
+    Implement these methods in your concrete broker (OandaBroker in app.py).
     """
 
     def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
@@ -63,9 +68,9 @@ class BrokerClient:
         take_profit: float,
     ) -> Any:
         """
-        Place a market/limit order with SL & TP.
+        Place a market order with SL & TP.
 
-        For now this is implemented only in OandaBroker.
+        NOTE: For OANDA, `size` should be interpreted as *units*.
         """
         raise NotImplementedError("Implement place_order in your broker client")
 
@@ -98,24 +103,50 @@ class MyMarket(MarketDataInterface):
         return float(quote.ask) - float(quote.bid)
 
 
-def _calc_position_size(
+def _calc_oanda_units_from_risk(
+    symbol: str,
     balance: float,
     risk_pct: float,
     entry: float,
     stop_loss: float,
-    pip_value: float,
-) -> float:
+) -> int:
     """
-    Very rough position size calculator.
-    You will likely replace this with your own logic later.
+    Practical paper-trading sizing that produces REAL OANDA 'units' (int).
+
+    We keep it simple and stable:
+      risk_amount = balance * (risk_pct / 100)
+      stop_distance = abs(entry - stop_loss)
+
+    Then approximate:
+      units ≈ risk_amount / stop_distance
+
+    This is NOT perfect FX pip-value math across crosses, but:
+      - it creates consistent unit sizing
+      - it avoids tiny fractional sizes that get int()'d to zero
+      - it executes reliably on paper
+
+    We also enforce:
+      - minimum units (FX vs XAU)
+      - maximum units cap
     """
     risk_amount = balance * (risk_pct / 100.0)
     stop_distance = abs(entry - stop_loss)
+
     if stop_distance <= 0:
-        return 0.0
-    # size * stop_distance * pip_value = risk_amount  ->  size = risk / (dist * pip_value)
-    size = risk_amount / (stop_distance * pip_value)
-    return max(size, 0.0)
+        return 0
+
+    raw_units = risk_amount / stop_distance
+
+    # Minimums per instrument family
+    if symbol == "XAUUSD":
+        units = max(MIN_UNITS_XAU, int(round(raw_units)))
+    else:
+        units = max(MIN_UNITS_FX, int(round(raw_units)))
+
+    # Safety cap
+    units = min(units, MAX_UNITS)
+
+    return units
 
 
 def run_tick(
@@ -130,7 +161,7 @@ def run_tick(
       - Builds MyMarket wrapper
       - Calls generate_signals(...)
       - Logs the signals
-      - Optionally places orders via broker_client.place_order (paper only)
+      - Places paper orders via broker_client.place_order (when enabled)
       - Returns the list of Signal objects
     """
     market = MyMarket(broker_client)
@@ -149,44 +180,37 @@ def run_tick(
             f"TP={sig.take_profit:.5f} RR={sig.rr}"
         )
 
-        # --- POSITION SIZING ---
-        # Example rough pip_value assumption:
-        if sig.symbol == "XAUUSD":
-            pip_value = 1.0
-        else:
-            pip_value = 0.0001
-
-        size = _calc_position_size(
+        units = _calc_oanda_units_from_risk(
+            symbol=sig.symbol,
             balance=balance,
             risk_pct=risk_pct_per_trade,
             entry=sig.entry,
             stop_loss=sig.stop_loss,
-            pip_value=pip_value,
         )
 
         print(
-            f"[{now.isoformat()}] Calculated size={size:.4f} for {sig.symbol} "
-            f"risk={risk_pct_per_trade}%."
+            f"[{now.isoformat()}] Units={units} (risk={risk_pct_per_trade}% "
+            f"balance={balance:.2f})"
         )
 
-        # --- ORDER EXECUTION (PAPER-ONLY, CONTROLLED BY TOGGLE) ---
-        if LIQUIDITY_TRADING_ENABLED and size > 0:
+        # --- ORDER EXECUTION (PAPER) ---
+        if LIQUIDITY_TRADING_ENABLED and units > 0:
             try:
                 order_resp = broker_client.place_order(
                     symbol=sig.symbol,
                     side=sig.side,
-                    size=size,
+                    size=float(units),  # pass units through 'size'
                     entry=sig.entry,
                     stop_loss=sig.stop_loss,
                     take_profit=sig.take_profit,
                 )
                 print(
-                    f"[{now.isoformat()}] Liquidity engine order response for "
+                    f"[{now.isoformat()}] Liquidity order response for "
                     f"{sig.symbol}: {order_resp}"
                 )
             except Exception as e:
                 print(
-                    f"[{now.isoformat()}] ERROR placing order for "
+                    f"[{now.isoformat()}] ERROR placing liquidity order for "
                     f"{sig.symbol}: {e}"
                 )
 
