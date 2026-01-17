@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -8,9 +9,8 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# Import the module so we can call forexbot_core.run_tick(...)
+# Import the strategy module so we can call forexbot_core.run_tick(...)
 import forexbot_core
-from forexbot_core import BrokerClient, Quote
 
 # ChaosFX engine
 from chaosfx.engine import ChaosEngineFX
@@ -18,13 +18,34 @@ from chaosfx.engine import ChaosEngineFX
 
 app = FastAPI(
     title="ForexBot – Liquidity + ChaosFX",
-    version="1.2.1",
+    version="1.2.2",
     description=(
         "Forex bot combining: "
         "Liquidity Sweep (EURGBP/XAUUSD/GBPCAD HTF bias + 5M sweeps) + "
         "ChaosEngine-FX (volatility/confidence execution)."
     ),
 )
+
+# ---------------------------------------------------------------------------
+# Minimal shared types for the liquidity engine brokers
+# (local versions – we no longer import these from forexbot_core)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Quote:
+    bid: float
+    ask: float
+
+
+class BrokerClient:
+    """
+    Minimal base just for type structure; concrete brokers implement:
+
+      - get_ohlc(symbol, timeframe, limit) -> list[dict]
+      - get_quote(symbol) -> Quote
+      - place_order(symbol, side, units, entry, stop_loss, take_profit)
+    """
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +86,7 @@ class OandaBroker(BrokerClient):
 
     SAFETY:
       - Liquidity orders only allowed automatically on practice
-      - live requires LIQUIDITY_ALLOW_LIVE=1
+      - Live requires LIQUIDITY_ALLOW_LIVE=1
     """
 
     SYMBOL_MAP = {
@@ -224,7 +245,7 @@ class OandaBroker(BrokerClient):
                 return {"status": "error", "detail": str(e)}
 
 
-def get_liquidity_broker() -> BrokerClient:
+def get_liquidity_broker():
     api_key = os.getenv("OANDA_API_KEY", "").strip()
     account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
 
@@ -275,8 +296,7 @@ def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int =
 # HTML dashboard
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML = """
-<!DOCTYPE html>
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -490,6 +510,7 @@ async def liquidity_tick():
     max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
     max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
 
+    # forexbot_core.run_tick now returns a dict summary (signals, orders, timestamp, etc.)
     result = forexbot_core.run_tick(
         broker_client=broker,
         balance=balance,
