@@ -8,15 +8,17 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from forexbot_core import run_tick, BrokerClient, Quote
+# Import the module so we can call forexbot_core.run_tick(...)
+import forexbot_core
+from forexbot_core import BrokerClient, Quote
 
-# ChaosFX
+# ChaosFX engine
 from chaosfx.engine import ChaosEngineFX
 
 
 app = FastAPI(
     title="ForexBot – Liquidity + ChaosFX",
-    version="1.2.0",
+    version="1.2.1",
     description=(
         "Forex bot combining: "
         "Liquidity Sweep (EURGBP/XAUUSD/GBPCAD HTF bias + 5M sweeps) + "
@@ -144,7 +146,9 @@ class OandaBroker(BrokerClient):
             except Exception:
                 continue
 
-            candles.append({"timestamp": ts, "open": o, "high": h, "low": l, "close": cl})
+            candles.append(
+                {"timestamp": ts, "open": o, "high": h, "low": l, "close": cl}
+            )
 
         return candles
 
@@ -186,12 +190,15 @@ class OandaBroker(BrokerClient):
         # SAFETY: block live unless explicitly allowed
         allow_live = os.getenv("LIQUIDITY_ALLOW_LIVE", "0").strip() == "1"
         if self.env == "live" and not allow_live:
-            return {"status": "blocked", "detail": "Liquidity live trading is blocked. Set LIQUIDITY_ALLOW_LIVE=1 to allow."}
+            return {
+                "status": "blocked",
+                "detail": "Liquidity live trading is blocked. "
+                          "Set LIQUIDITY_ALLOW_LIVE=1 to allow.",
+            }
 
         instrument = self._instrument(symbol)
         url = f"{self.base_url}/accounts/{self.account_id}/orders"
 
-        # OANDA market order with attached SL/TP
         payload: Dict[str, Any] = {
             "order": {
                 "type": "MARKET",
@@ -227,17 +234,21 @@ def get_liquidity_broker() -> BrokerClient:
             print("[LiquidityBroker] Using OandaBroker")
             return b
         except Exception as e:
-            print(f"[LiquidityBroker] Failed to init OandaBroker, falling back to DummyBroker: {e}")
+            print(
+                "[LiquidityBroker] Failed to init OandaBroker, "
+                f"falling back to DummyBroker: {e}"
+            )
 
     print("[LiquidityBroker] Using DummyBroker")
     return DummyBroker()
 
 
 # ---------------------------------------------------------------------------
-# Engines (ChaosFX object is long-lived)
+# ChaosFX engine (singleton-style)
 # ---------------------------------------------------------------------------
 
 CHAOS_ENGINE: Optional[ChaosEngineFX] = None
+
 
 def get_chaos_engine() -> ChaosEngineFX:
     global CHAOS_ENGINE
@@ -254,7 +265,7 @@ RECENT_LIQUIDITY: List[Dict[str, Any]] = []
 RECENT_LIQUIDITY_TRADES: List[Dict[str, Any]] = []
 
 
-def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int = 25) -> None:
+def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int = 25):
     buf.append(item)
     if len(buf) > max_len:
         del buf[: len(buf) - max_len]
@@ -357,7 +368,7 @@ DASHBOARD_HTML = """
         <div class="hr"></div>
         <pre id="liq-recent">Loading…</pre>
 
-        <div class="small">Docs: <a href="/docs" target="_blank">/docs</a> · Health: <a href="/health" target="_blank">/health</a></ Fletcher >
+        <div class="small">Docs: <a href="/docs" target="_blank">/docs</a> · Health: <a href="/health" target="_blank">/health</a></div>
       </div>
 
       <div class="card">
@@ -470,19 +481,16 @@ async def liquidity_tick():
     """
     broker = get_liquidity_broker()
 
-    # execution gates
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-
     execute_trades = bool(enabled and oanda_env == "practice")
 
-    # sizing controls
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
     risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
     max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
     max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
 
-    result = run_tick(
+    result = forexbot_core.run_tick(
         broker_client=broker,
         balance=balance,
         risk_pct_per_trade=risk_pct,
@@ -491,20 +499,21 @@ async def liquidity_tick():
         max_units_xau=max_units_xau,
     )
 
-    # store for dashboard
     _push_recent(RECENT_LIQUIDITY, result, max_len=25)
-
-    # store trades separately
     for o in result.get("orders", []):
         _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
 
     signals_count = len(result.get("signals", []))
     orders_count = len(result.get("orders", []))
 
-    mode = "Paper (OANDA practice only)" if execute_trades else "Signals only"
+    mode = (
+        "Mode: Paper (OANDA practice only)"
+        if execute_trades
+        else "Mode: Signals only"
+    )
 
     note = (
-        f"Signals: {signals_count} · Orders placed: {orders_count} · Mode: {mode}. "
+        f"Signals: {signals_count} · Orders placed: {orders_count} · {mode}. "
         "If zero, it simply means no valid setup at this moment."
     )
 
@@ -524,10 +533,19 @@ async def liquidity_tick():
 async def liquidity_recent():
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    mode = "Mode: Paper (OANDA practice only)" if (enabled and oanda_env == "practice") else "Mode: Signals only"
+    mode = (
+        "Mode: Paper (OANDA practice only)"
+        if (enabled and oanda_env == "practice")
+        else "Mode: Signals only"
+    )
 
     if not RECENT_LIQUIDITY:
-        return JSONResponse({"mode": mode, "text": "No liquidity runs yet. Click 'Run Liquidity Tick'."})
+        return JSONResponse(
+            {
+                "mode": mode,
+                "text": "No liquidity runs yet. Click 'Run Liquidity Tick'.",
+            }
+        )
 
     last = RECENT_LIQUIDITY[-1]
     ts = last.get("timestamp", "")
@@ -535,20 +553,25 @@ async def liquidity_recent():
     orders = last.get("orders", [])
 
     lines = [f"Last run: {ts}", f"Signals: {len(sigs)} · Orders: {len(orders)}"]
+
     if sigs:
         lines.append("")
         lines.append("Signals:")
         for s in sigs[:6]:
             lines.append(
-                f"- {s.get('symbol')} {str(s.get('side')).upper()} entry={s.get('entry'):.5f} "
-                f"SL={s.get('stop_loss'):.5f} TP={s.get('take_profit'):.5f} RR={s.get('rr')}"
+                f"- {s.get('symbol')} {str(s.get('side')).upper()} "
+                f"entry={s.get('entry'):.5f} SL={s.get('stop_loss'):.5f} "
+                f"TP={s.get('take_profit'):.5f} RR={s.get('rr')}"
             )
 
     if orders:
         lines.append("")
         lines.append("Orders:")
         for o in orders[:6]:
-            lines.append(f"- {o.get('symbol')} {str(o.get('side')).upper()} units={o.get('units')} (sent)")
+            lines.append(
+                f"- {o.get('symbol')} {str(o.get('side')).upper()} "
+                f"units={o.get('units')} (sent)"
+            )
 
     return JSONResponse({"mode": mode, "text": "\n".join(lines)})
 
@@ -587,7 +610,8 @@ async def chaosfx_status():
 
     summary_text = (
         f"Equity: {last.get('equity')} · Reason: {last.get('reason')} · "
-        f"Actions: {len(last.get('actions', []))} · Surge: {'ON' if last.get('surge_mode') else 'OFF'}"
+        f"Actions: {len(last.get('actions', []))} · "
+        f"Surge: {'ON' if last.get('surge_mode') else 'OFF'}"
     )
 
     if not trades:
@@ -597,7 +621,8 @@ async def chaosfx_status():
         for t in trades[-8:]:
             lines.append(
                 f"- {t.get('pair')} {t.get('side')} units={t.get('units')} "
-                f"SL={t.get('stop_loss')} TP={t.get('take_profit')} conf={t.get('confidence')}"
+                f"SL={t.get('stop_loss')} TP={t.get('take_profit')} "
+                f"conf={t.get('confidence')}"
             )
         trades_text = "\n".join(lines)
 
