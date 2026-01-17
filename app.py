@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import List
 
+import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -11,7 +13,7 @@ from forexbot_core import run_tick, BrokerClient, Quote
 
 app = FastAPI(
     title="ForexBot – Liquidity Sweep Strategy",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Forex day trading engine focused on EURGBP, XAUUSD, GBPCAD using "
         "4H/1H bias + 5M liquidity sweeps and BOS confirmation."
@@ -20,27 +22,23 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# Dummy broker implementation (SAFE: no real orders, no real data)
+# Broker implementations
 # ---------------------------------------------------------------------------
 
 
 class DummyBroker(BrokerClient):
     """
-    Placeholder broker so the app runs safely.
+    Safe broker used when OANDA credentials are not configured or fail.
 
     - get_ohlc returns an empty list -> strategy finds no signals
     - get_quote returns 0/0 -> spread 0 (not used because no candles)
     - place_order only prints to console
-
-    When you're ready to go live, replace this with a real broker client.
     """
 
     def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
-        # TODO: Replace with real broker candles.
         return []
 
     def get_quote(self, symbol: str) -> Quote:
-        # TODO: Replace with real broker quote.
         return Quote(bid=0.0, ask=0.0)
 
     def place_order(
@@ -58,6 +56,184 @@ class DummyBroker(BrokerClient):
             f"SL={stop_loss} TP={take_profit}"
         )
         return {"status": "dummy", "detail": "No real broker is configured."}
+
+
+class OandaBroker(BrokerClient):
+    """
+    OANDA v20 REST broker implementation for data only (no live orders yet).
+
+    Reads config from environment:
+      - OANDA_API_KEY
+      - OANDA_ACCOUNT_ID
+      - OANDA_ENV = 'practice' or 'live' (default: practice)
+
+    Instruments mapping:
+      EURGBP -> EUR_GBP
+      XAUUSD -> XAU_USD
+      GBPCAD -> GBP_CAD
+    """
+
+    SYMBOL_MAP = {
+        "EURGBP": "EUR_GBP",
+        "XAUUSD": "XAU_USD",
+        "GBPCAD": "GBP_CAD",
+    }
+
+    TF_MAP = {
+        "4H": "H4",
+        "1H": "H1",
+        "5M": "M5",
+    }
+
+    def __init__(self):
+        api_key = os.getenv("OANDA_API_KEY", "").strip()
+        account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+        env = os.getenv("OANDA_ENV", "practice").strip().lower()
+
+        if not api_key or not account_id:
+            raise RuntimeError("OANDA_API_KEY or OANDA_ACCOUNT_ID not set")
+
+        if env == "live":
+            base_url = "https://api-fxtrade.oanda.com/v3"
+        else:
+            base_url = "https://api-fxpractice.oanda.com/v3"
+
+        self.api_key = api_key
+        self.account_id = account_id
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
+
+    def _instrument(self, symbol: str) -> str:
+        if symbol not in self.SYMBOL_MAP:
+            raise ValueError(f"Unsupported symbol for OANDA: {symbol}")
+        return self.SYMBOL_MAP[symbol]
+
+    def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
+        instrument = self._instrument(symbol)
+        granularity = self.TF_MAP.get(timeframe)
+        if granularity is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        url = f"{self.base_url}/instruments/{instrument}/candles"
+        params = {
+            "granularity": granularity,
+            "count": limit,
+            "price": "M",  # mid prices
+        }
+
+        try:
+            resp = self.session.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"[OandaBroker] get_ohlc error for {symbol} {timeframe}: {e}")
+            return []
+
+        data = resp.json()
+        candles_raw = data.get("candles", [])
+        candles: List[dict] = []
+
+        for c in candles_raw:
+            # skip incomplete candles
+            if not c.get("complete", False):
+                continue
+            t = c.get("time")
+            if not t:
+                continue
+            # OANDA time format: '2025-01-16T12:00:00.000000000Z'
+            t = t.replace("Z", "+00:00")
+            try:
+                ts = datetime.fromisoformat(t)
+            except Exception:
+                continue
+
+            mid = c.get("mid", {})
+            try:
+                o = float(mid.get("o"))
+                h = float(mid.get("h"))
+                l = float(mid.get("l"))
+                cl = float(mid.get("c"))
+            except Exception:
+                continue
+
+            candles.append(
+                {
+                    "timestamp": ts,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": cl,
+                }
+            )
+
+        return candles
+
+    def get_quote(self, symbol: str) -> Quote:
+        instrument = self._instrument(symbol)
+        url = f"{self.base_url}/accounts/{self.account_id}/pricing"
+        params = {"instruments": instrument}
+
+        try:
+            resp = self.session.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"[OandaBroker] get_quote error for {symbol}: {e}")
+            return Quote(bid=0.0, ask=0.0)
+
+        data = resp.json()
+        prices = data.get("prices", [])
+        if not prices:
+            return Quote(bid=0.0, ask=0.0)
+
+        p = prices[0]
+        try:
+            bid = float(p["bids"][0]["price"])
+            ask = float(p["asks"][0]["price"])
+        except Exception:
+            return Quote(bid=0.0, ask=0.0)
+
+        return Quote(bid=bid, ask=ask)
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        entry: float,
+        stop_loss: float,
+        take_profit: float,
+    ):
+        """
+        Placeholder: orders are NOT sent yet.
+        When we enable trading, we will implement a proper OANDA order here.
+        """
+        print(
+            f"[OandaBroker] place_order (NOT SENT): "
+            f"{symbol} {side} size={size} entry={entry} "
+            f"SL={stop_loss} TP={take_profit}"
+        )
+        return {"status": "not_sent", "detail": "Trading not enabled yet."}
+
+
+def get_broker() -> BrokerClient:
+    """
+    Chooses broker implementation:
+      - If OANDA env vars are set -> OandaBroker
+      - Else -> DummyBroker
+    """
+    api_key = os.getenv("OANDA_API_KEY", "").strip()
+    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+
+    if api_key and account_id:
+        try:
+            broker = OandaBroker()
+            print("[Broker] Using OandaBroker (data live, trading disabled).")
+            return broker
+        except Exception as e:
+            print(f"[Broker] Failed to init OandaBroker, falling back to DummyBroker: {e}")
+
+    print("[Broker] Using DummyBroker (no real data).")
+    return DummyBroker()
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +371,7 @@ DASHBOARD_HTML = """
   <div class="card">
     <div class="badge">
       <span class="badge-dot"></span>
-      <span>Live engine</span>
+      <span>Engine online</span>
     </div>
     <h1>ForexBot – Liquidity Sweep</h1>
     <p class="sub">
@@ -206,7 +382,7 @@ DASHBOARD_HTML = """
     <div class="row">
       <div class="pill">Session: London / NY</div>
       <div class="pill">RR: 1:3 – 1:5</div>
-      <div class="pill">Mode: Safe (DummyBroker)</div>
+      <div class="pill">Mode: Data live, trading off</div>
     </div>
 
     <div class="label">Controls</div>
@@ -254,17 +430,13 @@ DASHBOARD_HTML = """
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """
-    HTML dashboard for the bot.
-    """
+    """HTML dashboard for the bot."""
     return HTMLResponse(content=DASHBOARD_HTML)
 
 
 @app.get("/health", response_class=JSONResponse)
 async def health():
-    """
-    Simple health endpoint for uptime checks.
-    """
+    """Simple health endpoint for uptime checks."""
     return JSONResponse({"status": "healthy"})
 
 
@@ -273,13 +445,15 @@ async def run_strategy_tick():
     """
     Manually trigger one strategy evaluation tick.
 
-    For now:
-      - Uses DummyBroker (no live trading)
-      - Logs signals, if any, to stdout (Render logs)
+    Uses:
+      - OandaBroker if OANDA env vars are set & valid
+      - DummyBroker otherwise
+
+    Trading is still disabled; only data is used and signals are logged.
     """
     now = datetime.now(timezone.utc)
 
-    broker = DummyBroker()
+    broker = get_broker()
     fake_balance = 10_000.0  # used only for position size math
 
     run_tick(
@@ -293,8 +467,9 @@ async def run_strategy_tick():
             "status": "tick_completed",
             "timestamp_utc": now.isoformat(),
             "note": (
-                "Tick executed with DummyBroker. "
-                "No real orders were placed. Check logs for signals."
+                "Tick executed. Check logs for signals. "
+                "If OANDA is configured, live market data was used. "
+                "Trading remains disabled."
             ),
         }
     )
