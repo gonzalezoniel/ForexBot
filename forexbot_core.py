@@ -12,6 +12,14 @@ from liquidity_sweep_strategy import (
     Symbol,
 )
 
+# ---------------------------------------------------------------------------
+# Liquidity engine trading toggle
+# ---------------------------------------------------------------------------
+
+# If True, the liquidity engine will call broker_client.place_order(...)
+# If False, it will remain signal-only.
+LIQUIDITY_TRADING_ENABLED: bool = True
+
 
 @dataclass
 class Quote:
@@ -23,7 +31,7 @@ class BrokerClient:
     """
     Placeholder interface for your real broker client.
 
-    Replace the methods below with calls to your existing OANDA/MT5/etc. client.
+    Implement these methods in your concrete broker (see OandaBroker in app.py).
     """
 
     def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
@@ -57,7 +65,7 @@ class BrokerClient:
         """
         Place a market/limit order with SL & TP.
 
-        For now you can leave this unimplemented or just log.
+        For now this is implemented only in OandaBroker.
         """
         raise NotImplementedError("Implement place_order in your broker client")
 
@@ -116,14 +124,14 @@ def run_tick(
     risk_pct_per_trade: float = 0.5,
 ) -> List[Signal]:
     """
-    Call this from your existing main loop.
+    Run one evaluation cycle of the liquidity sweep strategy.
 
     It:
       - Builds MyMarket wrapper
       - Calls generate_signals(...)
       - Logs the signals
-      - Returns signals to the API/dashboard
-      - (Optional) places orders via broker_client.place_order (still disabled)
+      - Optionally places orders via broker_client.place_order (paper only)
+      - Returns the list of Signal objects
     """
     market = MyMarket(broker_client)
     now = datetime.now(timezone.utc)
@@ -141,8 +149,7 @@ def run_tick(
             f"TP={sig.take_profit:.5f} RR={sig.rr}"
         )
 
-        # --- ORDER EXECUTION (OPTIONAL, SAFE TO LEAVE DISABLED WHILE TESTING) ---
-        # TODO: tune pip_value / volume logic per symbol + your broker
+        # --- POSITION SIZING ---
         # Example rough pip_value assumption:
         if sig.symbol == "XAUUSD":
             pip_value = 1.0
@@ -162,15 +169,25 @@ def run_tick(
             f"risk={risk_pct_per_trade}%."
         )
 
-        # When you're ready to let it fire live orders, uncomment and wire this:
-        # order_resp = broker_client.place_order(
-        #     symbol=sig.symbol,
-        #     side=sig.side,
-        #     size=size,
-        #     entry=sig.entry,
-        #     stop_loss=sig.stop_loss,
-        #     take_profit=sig.take_profit,
-        # )
-        # print(f"[{now.isoformat()}] Order response: {order_resp}")
+        # --- ORDER EXECUTION (PAPER-ONLY, CONTROLLED BY TOGGLE) ---
+        if LIQUIDITY_TRADING_ENABLED and size > 0:
+            try:
+                order_resp = broker_client.place_order(
+                    symbol=sig.symbol,
+                    side=sig.side,
+                    size=size,
+                    entry=sig.entry,
+                    stop_loss=sig.stop_loss,
+                    take_profit=sig.take_profit,
+                )
+                print(
+                    f"[{now.isoformat()}] Liquidity engine order response for "
+                    f"{sig.symbol}: {order_resp}"
+                )
+            except Exception as e:
+                print(
+                    f"[{now.isoformat()}] ERROR placing order for "
+                    f"{sig.symbol}: {e}"
+                )
 
     return signals
