@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -18,7 +20,7 @@ from chaosfx.engine import ChaosEngineFX
 
 app = FastAPI(
     title="ForexBot – Liquidity + ChaosFX",
-    version="1.2.2",
+    version="1.3.0",
     description=(
         "Forex bot combining: "
         "Liquidity Sweep (EURGBP/XAUUSD/GBPCAD HTF bias + 5M sweeps) + "
@@ -26,9 +28,17 @@ app = FastAPI(
     ),
 )
 
+logger = logging.getLogger("forexbot")
+
+# Background loop config via env (with safe defaults)
+AUTO_RUN_ENABLED = os.getenv("AUTO_RUN_ENABLED", "1").strip() == "1"
+try:
+    LOOP_INTERVAL_SECONDS = int(os.getenv("LOOP_INTERVAL_SECONDS", "180"))
+except ValueError:
+    LOOP_INTERVAL_SECONDS = 180
+
 # ---------------------------------------------------------------------------
 # Minimal shared types for the liquidity engine brokers
-# (local versions – we no longer import these from forexbot_core)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -327,6 +337,60 @@ def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int =
 
 
 # ---------------------------------------------------------------------------
+# Core cycle helpers (used by both endpoints and background loop)
+# ---------------------------------------------------------------------------
+
+def run_liquidity_cycle_once() -> tuple[Dict[str, Any], str]:
+    """
+    Run one Liquidity engine cycle and update RECENT_* buffers.
+
+    Returns:
+        (result_dict, mode_str)
+    """
+    broker = get_liquidity_broker()
+
+    oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
+    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+    execute_trades = bool(enabled and oanda_env == "practice")
+
+    balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
+    risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
+    max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
+    max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
+
+    result = forexbot_core.run_tick(
+        broker_client=broker,
+        balance=balance,
+        risk_pct_per_trade=risk_pct,
+        execute_trades=execute_trades,
+        max_units_fx=max_units_fx,
+        max_units_xau=max_units_xau,
+    )
+
+    _push_recent(RECENT_LIQUIDITY, result, max_len=25)
+    for o in result.get("orders", []):
+        _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+
+    mode = (
+        "Mode: Paper (OANDA practice only)"
+        if execute_trades
+        else "Mode: Signals only"
+    )
+
+    return result, mode
+
+
+def run_chaosfx_cycle_once() -> Dict[str, Any]:
+    """
+    Run one ChaosFX engine cycle and return the summary.
+    ChaosEngineFX internally updates last_summary and recent_trades.
+    """
+    engine = get_chaos_engine()
+    summary = engine.run_once()
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # HTML dashboard
 # ---------------------------------------------------------------------------
 
@@ -533,39 +597,10 @@ async def liquidity_tick():
     Runs Liquidity engine once.
     If OANDA_ENV=practice and LIQUIDITY_TRADING_ENABLED=1, it will place paper trades.
     """
-    broker = get_liquidity_broker()
-
-    oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    execute_trades = bool(enabled and oanda_env == "practice")
-
-    balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
-    risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
-    max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
-    max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
-
-    # forexbot_core.run_tick now returns a dict summary (signals, orders, timestamp, etc.)
-    result = forexbot_core.run_tick(
-        broker_client=broker,
-        balance=balance,
-        risk_pct_per_trade=risk_pct,
-        execute_trades=execute_trades,
-        max_units_fx=max_units_fx,
-        max_units_xau=max_units_xau,
-    )
-
-    _push_recent(RECENT_LIQUIDITY, result, max_len=25)
-    for o in result.get("orders", []):
-        _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+    result, mode = run_liquidity_cycle_once()
 
     signals_count = len(result.get("signals", []))
     orders_count = len(result.get("orders", []))
-
-    mode = (
-        "Mode: Paper (OANDA practice only)"
-        if execute_trades
-        else "Mode: Signals only"
-    )
 
     note = (
         f"Signals: {signals_count} · Orders placed: {orders_count} · {mode}. "
@@ -635,8 +670,7 @@ async def liquidity_recent():
 
 @app.post("/api/chaosfx/tick", response_class=JSONResponse)
 async def chaosfx_tick():
-    engine = get_chaos_engine()
-    summary = engine.run_once()
+    summary = run_chaosfx_cycle_once()
     return JSONResponse(
         {
             "status": "ok",
@@ -682,3 +716,57 @@ async def chaosfx_status():
         trades_text = "\n".join(lines)
 
     return JSONResponse({"summary_text": summary_text, "trades_text": trades_text})
+
+
+# ---------------------------------------------------------------------------
+# Background loop startup
+# ---------------------------------------------------------------------------
+
+async def forexbot_background_loop():
+    logger.info(
+        "Starting ForexBot background loop; interval=%s seconds",
+        LOOP_INTERVAL_SECONDS,
+    )
+
+    while True:
+        try:
+            # Liquidity cycle
+            liq_result, liq_mode = await asyncio.to_thread(run_liquidity_cycle_once)
+            sigs = len(liq_result.get("signals", []))
+            ords = len(liq_result.get("orders", []))
+            logger.info(
+                "Liquidity cycle complete: signals=%s orders=%s mode=%s",
+                sigs,
+                ords,
+                liq_mode,
+            )
+        except Exception:
+            logger.exception("Error in liquidity background cycle")
+
+        try:
+            # ChaosFX cycle
+            cx_summary = await asyncio.to_thread(run_chaosfx_cycle_once)
+            actions = len(cx_summary.get("actions", []))
+            logger.info(
+                "ChaosFX cycle complete: equity=%s reason=%s actions=%s surge=%s",
+                cx_summary.get("equity"),
+                cx_summary.get("reason"),
+                actions,
+                cx_summary.get("surge_mode"),
+            )
+        except Exception:
+            logger.exception("Error in ChaosFX background cycle")
+
+        await asyncio.sleep(LOOP_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def start_background_tasks():
+    if AUTO_RUN_ENABLED:
+        logger.info(
+            "AUTO_RUN_ENABLED=1 – spawning forexbot_background_loop task (interval=%s).",
+            LOOP_INTERVAL_SECONDS,
+        )
+        asyncio.create_task(forexbot_background_loop())
+    else:
+        logger.info("AUTO_RUN_ENABLED=0 – background loop disabled.")
