@@ -95,9 +95,15 @@ def generate_signal(
 
     # Trend context
     trend = "FLAT"
-    if last["ma_fast"] > last["ma_slow"] and df["ma_fast"].iloc[-1] > df["ma_fast"].iloc[-5]:
+    if (
+        last["ma_fast"] > last["ma_slow"]
+        and df["ma_fast"].iloc[-1] > df["ma_fast"].iloc[-5]
+    ):
         trend = "UP"
-    elif last["ma_fast"] < last["ma_slow"] and df["ma_fast"].iloc[-1] < df["ma_fast"].iloc[-5]:
+    elif (
+        last["ma_fast"] < last["ma_slow"]
+        and df["ma_fast"].iloc[-1] < df["ma_fast"].iloc[-5]
+    ):
         trend = "DOWN"
 
     # Patterns
@@ -115,7 +121,8 @@ def generate_signal(
     vol_component = 0.0
 
     if vol_score > 0 and settings.VOLATILITY_MIN_SCORE > 0:
-        vol_component = min(vol_score / settings.VOLATILITY_MIN_SCORE, 2.0)  # cap
+        # cap contribution so crazy vol doesn't explode confidence
+        vol_component = min(vol_score / settings.VOLATILITY_MIN_SCORE, 2.0)
 
     # LONG setups
     if high_vol:
@@ -175,8 +182,12 @@ def generate_signal(
         atr_in_pips = last["atr"] / pip_factor
 
     # dynamic pips using ATR, but never smaller than defaults
-    dyn_sl_pips = max(sl_pips, atr_in_pips * settings.ATR_SL_MULTIPLIER) if atr_in_pips > 0 else sl_pips
-    dyn_tp_pips = max(tp_pips, atr_in_pips * settings.ATR_TP_MULTIPLIER) if atr_in_pips > 0 else tp_pips
+    if atr_in_pips > 0:
+        dyn_sl_pips = max(sl_pips, atr_in_pips * settings.ATR_SL_MULTIPLIER)
+        dyn_tp_pips = max(tp_pips, atr_in_pips * settings.ATR_TP_MULTIPLIER)
+    else:
+        dyn_sl_pips = sl_pips
+        dyn_tp_pips = tp_pips
 
     sl_distance = dyn_sl_pips * pip_factor
     tp_distance = dyn_tp_pips * pip_factor
@@ -224,24 +235,42 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def _bullish_engulfing(last: pd.Series, prev: pd.Series) -> bool:
-    prev_bear = prev["close"] < prev["open"]
-    curr_bull = last["close"] > last["open"]
+    """
+    Bullish engulfing pattern on the last two candles.
+    We compare absolute body size using built-in abs() so we don't
+    hit numpy.float64 `.abs` attribute errors.
+    """
+    prev_body = float(prev["close"] - prev["open"])
+    curr_body = float(last["close"] - last["open"])
+
+    prev_bear = prev_body < 0   # previous red
+    curr_bull = curr_body > 0   # current green
+
     body_engulf = (
         last["close"] >= prev["open"]
         and last["open"] <= prev["close"]
-        and (last["close"] - last["open"]) > (prev["open"] - prev["close"]).abs()
+        and abs(curr_body) > abs(prev_body)
     )
+
     return bool(prev_bear and curr_bull and body_engulf)
 
 
 def _bearish_engulfing(last: pd.Series, prev: pd.Series) -> bool:
-    prev_bull = prev["close"] > prev["open"]
-    curr_bear = last["close"] < last["open"]
+    """
+    Bearish engulfing pattern on the last two candles.
+    """
+    prev_body = float(prev["close"] - prev["open"])
+    curr_body = float(last["close"] - last["open"])
+
+    prev_bull = prev_body > 0   # previous green
+    curr_bear = curr_body < 0   # current red
+
     body_engulf = (
         last["close"] <= prev["open"]
         and last["open"] >= prev["close"]
-        and (last["open"] - last["close"]) > (prev["close"] - prev["open"]).abs()
+        and abs(curr_body) > abs(prev_body)
     )
+
     return bool(prev_bull and curr_bear and body_engulf)
 
 
