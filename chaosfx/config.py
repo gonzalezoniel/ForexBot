@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     OANDA_ACCOUNT_ID: str
     OANDA_ENV: str = "practice"
 
+    # Liquidity engine toggle (used by app.py)
+    LIQUIDITY_TRADING_ENABLED: int = 0
+
+
     # Defaults
     DEFAULT_SL_PIPS: float = 15.0
     DEFAULT_TP_PIPS: float = 30.0
