@@ -77,16 +77,17 @@ class DummyBroker(BrokerClient):
 
 class OandaBroker(BrokerClient):
     """
-    OANDA v20 REST broker for Liquidity engine (data + market orders).
+    OANDA v20 REST broker implementation.
 
-    Env:
+    Reads config from environment:
       - OANDA_API_KEY
       - OANDA_ACCOUNT_ID
-      - OANDA_ENV = practice|live
+      - OANDA_ENV = 'practice' or 'live' (default: practice)
 
-    SAFETY:
-      - Liquidity orders only allowed automatically on practice
-      - Live requires LIQUIDITY_ALLOW_LIVE=1
+    Instruments mapping:
+      EURGBP -> EUR_GBP
+      XAUUSD -> XAU_USD
+      GBPCAD -> GBP_CAD
     """
 
     SYMBOL_MAP = {
@@ -109,22 +110,25 @@ class OandaBroker(BrokerClient):
         if not api_key or not account_id:
             raise RuntimeError("OANDA_API_KEY or OANDA_ACCOUNT_ID not set")
 
-        self.env = env
-        self.account_id = account_id
-
         if env == "live":
-            self.base_url = "https://api-fxtrade.oanda.com/v3"
+            base_url = "https://api-fxtrade.oanda.com/v3"
         else:
-            self.base_url = "https://api-fxpractice.oanda.com/v3"
+            base_url = "https://api-fxpractice.oanda.com/v3"
+
+        self.api_key = api_key
+        self.account_id = account_id
+        self.base_url = base_url
+        self.env = env
 
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {api_key}"})
-        self.session.headers.update({"Content-Type": "application/json"})
+        self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 
     def _instrument(self, symbol: str) -> str:
         if symbol not in self.SYMBOL_MAP:
             raise ValueError(f"Unsupported symbol for OANDA: {symbol}")
         return self.SYMBOL_MAP[symbol]
+
+    # --------- Market data ----------
 
     def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
         instrument = self._instrument(symbol)
@@ -133,7 +137,11 @@ class OandaBroker(BrokerClient):
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 
         url = f"{self.base_url}/instruments/{instrument}/candles"
-        params = {"granularity": granularity, "count": limit, "price": "M"}
+        params = {
+            "granularity": granularity,
+            "count": limit,
+            "price": "M",  # mid prices
+        }
 
         try:
             resp = self.session.get(url, params=params, timeout=10)
@@ -147,11 +155,13 @@ class OandaBroker(BrokerClient):
         candles: List[dict] = []
 
         for c in candles_raw:
+            # skip incomplete candles
             if not c.get("complete", False):
                 continue
             t = c.get("time")
             if not t:
                 continue
+            # OANDA time format: '2025-01-16T12:00:00.000000000Z'
             t = t.replace("Z", "+00:00")
             try:
                 ts = datetime.fromisoformat(t)
@@ -168,7 +178,13 @@ class OandaBroker(BrokerClient):
                 continue
 
             candles.append(
-                {"timestamp": ts, "open": o, "high": h, "low": l, "close": cl}
+                {
+                    "timestamp": ts,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": cl,
+                }
             )
 
         return candles
@@ -199,6 +215,8 @@ class OandaBroker(BrokerClient):
 
         return Quote(bid=bid, ask=ask)
 
+    # --------- Orders (market + SL/TP) ----------
+
     def place_order(
         self,
         symbol: str,
@@ -208,41 +226,57 @@ class OandaBroker(BrokerClient):
         stop_loss: float,
         take_profit: float,
     ):
-        # SAFETY: block live unless explicitly allowed
-        allow_live = os.getenv("LIQUIDITY_ALLOW_LIVE", "0").strip() == "1"
-        if self.env == "live" and not allow_live:
-            return {
-                "status": "blocked",
-                "detail": "Liquidity live trading is blocked. "
-                          "Set LIQUIDITY_ALLOW_LIVE=1 to allow.",
-            }
+        """
+        Send a MARKET order to OANDA with SL & TP.
 
+        - units: positive magnitude (we set sign from side)
+        - side: 'long' or 'short'
+        """
         instrument = self._instrument(symbol)
-        url = f"{self.base_url}/accounts/{self.account_id}/orders"
 
-        payload: Dict[str, Any] = {
+        # OANDA convention: units > 0 = buy, units < 0 = sell
+        u = abs(int(units))
+        if side.lower() == "short":
+            u = -u
+
+        order_payload: Dict[str, Any] = {
             "order": {
-                "type": "MARKET",
+                "units": str(u),
                 "instrument": instrument,
-                "units": str(units),
                 "timeInForce": "FOK",
+                "type": "MARKET",
                 "positionFill": "DEFAULT",
-                "stopLossOnFill": {"price": f"{stop_loss:.5f}"},
-                "takeProfitOnFill": {"price": f"{take_profit:.5f}"},
             }
         }
 
+        # Attach SL/TP if provided
+        if stop_loss:
+            order_payload["order"]["stopLossOnFill"] = {
+                "price": f"{stop_loss:.5f}"
+            }
+        if take_profit:
+            order_payload["order"]["takeProfitOnFill"] = {
+                "price": f"{take_profit:.5f}"
+            }
+
+        url = f"{self.base_url}/accounts/{self.account_id}/orders"
+
         try:
-            resp = self.session.post(url, json=payload, timeout=10)
+            resp = self.session.post(url, json=order_payload, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            return {"status": "ok", "oanda": data}
+            print(
+                f"[OandaBroker] ORDER SENT ({self.env}) "
+                f"{symbol} {side.upper()} units={u} "
+                f"SL={stop_loss:.5f} TP={take_profit:.5f}"
+            )
+            return {"status": "ok", "raw": data}
         except Exception as e:
-            print(f"[OandaBroker] place_order error: {e}")
-            try:
-                return {"status": "error", "detail": str(e), "body": resp.text}  # type: ignore
-            except Exception:
-                return {"status": "error", "detail": str(e)}
+            print(
+                f"[OandaBroker] ERROR sending order for {symbol}: {e} "
+                f"payload={order_payload}"
+            )
+            return {"status": "error", "detail": str(e), "payload": order_payload}
 
 
 def get_liquidity_broker():
