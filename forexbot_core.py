@@ -136,7 +136,7 @@ def run_tick(
 
     if not signals:
         print(f"[{now.isoformat()}] Liquidity: no signals.")
-        return {"timestamp": now.isoformat(), "signals": [], "orders": []}
+        return {"timestamp": now.isoformat(), "signals": [], "planned_orders": [], "orders": []}
 
     signals_out: List[Dict[str, Any]] = []
     orders_out: List[Dict[str, Any]] = []

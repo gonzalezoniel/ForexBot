@@ -517,6 +517,16 @@ async def liquidity_tick():
 
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+
+    if enabled and oanda_env not in {"practice", "live"}:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "note": f"Invalid OANDA_ENV={oanda_env!r}. Expected 'practice' or 'live'.",
+            },
+        )
+
     execute_trades = bool(enabled and oanda_env in {"practice", "live"})
 
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
@@ -542,7 +552,7 @@ async def liquidity_tick():
     orders_count = len(result.get("orders", []))
 
     if execute_trades:
-        mode = f"Mode: Live trading enabled ({oanda_env})"
+        mode = f"Mode: Execution enabled ({oanda_env})"
     else:
         mode = "Mode: Signals only"
 
@@ -570,7 +580,7 @@ async def liquidity_recent():
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
     mode = (
-        f"Mode: Live trading enabled ({oanda_env})"
+        f"Mode: Execution enabled ({oanda_env})"
         if (enabled and oanda_env in {"practice", "live"})
         else "Mode: Signals only"
     )
