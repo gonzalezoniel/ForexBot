@@ -400,7 +400,11 @@ def _liquidity_env_state() -> Dict[str, Any]:
     env_valid = oanda_env in {"practice", "live"}
 
     if test_mode:
-        mode = "Mode: Test broker (synthetic market)"
+        mode = (
+            "Mode: Test broker execution enabled (synthetic market)"
+            if enabled
+            else "Mode: Test broker signals only (synthetic market)"
+        )
     else:
         mode = (
             f"Mode: Execution enabled ({oanda_env})"
@@ -672,7 +676,9 @@ async def liquidity_tick():
             },
         )
 
-    execute_trades = bool((not env_state["test_mode"]) and enabled and env_state["env_valid"])
+    execute_trades = bool(
+        enabled and (env_state["test_mode"] or env_state["env_valid"])
+    )
 
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
     risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
@@ -711,6 +717,8 @@ async def liquidity_tick():
             "signals_found": signals_count,
             "orders_planned": planned_count,
             "orders_placed": orders_count,
+            "execute_trades": execute_trades,
+            "test_mode": env_state["test_mode"],
             "mode": mode,
             "note": note,
         }
@@ -721,6 +729,12 @@ async def liquidity_tick():
 async def liquidity_recent():
     env_state = _liquidity_env_state()
     mode = env_state["mode"]
+
+    def _fmt_price(v: Any) -> str:
+        try:
+            return f"{float(v):.5f}"
+        except Exception:
+            return "n/a"
 
     if (not env_state["test_mode"]) and env_state["enabled"] and env_state["missing"]:
         missing = ", ".join(env_state["missing"])
@@ -759,8 +773,8 @@ async def liquidity_recent():
         for s in sigs[:6]:
             lines.append(
                 f"- {s.get('symbol')} {str(s.get('side')).upper()} "
-                f"entry={s.get('entry'):.5f} SL={s.get('stop_loss'):.5f} "
-                f"TP={s.get('take_profit'):.5f} RR={s.get('rr')}"
+                f"entry={_fmt_price(s.get('entry'))} SL={_fmt_price(s.get('stop_loss'))} "
+                f"TP={_fmt_price(s.get('take_profit'))} RR={s.get('rr', 'n/a')}"
             )
 
     if orders:
