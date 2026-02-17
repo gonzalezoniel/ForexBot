@@ -140,6 +140,7 @@ def run_tick(
 
     signals_out: List[Dict[str, Any]] = []
     orders_out: List[Dict[str, Any]] = []
+    planned_out: List[Dict[str, Any]] = []
 
     for sig in signals:
         # --- Log the signal ---
@@ -198,6 +199,18 @@ def run_tick(
             f"for {sig.symbol} risk={risk_pct_per_trade}%."
         )
 
+        plan_payload = {
+            "symbol": sig.symbol,
+            "side": sig.side,
+            "units": signed_units,
+            "entry": float(sig.entry),
+            "stop_loss": float(sig.stop_loss),
+            "take_profit": float(sig.take_profit),
+            "rr": float(sig.rr),
+            "comment": sig.comment,
+        }
+        planned_out.append(plan_payload)
+
         order_resp: Any = None
         if execute_trades:
             try:
@@ -213,11 +226,23 @@ def run_tick(
                     f"[{now.isoformat()}] Liquidity: order sent for {sig.symbol}, "
                     f"response={order_resp}"
                 )
+                orders_out.append(
+                    {
+                        **plan_payload,
+                        "response": order_resp,
+                    }
+                )
             except Exception as e:
                 order_resp = {"status": "error", "detail": str(e)}
                 print(
                     f"[{now.isoformat()}] Liquidity: ERROR placing order for "
                     f"{sig.symbol}: {e}"
+                )
+                orders_out.append(
+                    {
+                        **plan_payload,
+                        "response": order_resp,
+                    }
                 )
         else:
             print(
@@ -225,22 +250,9 @@ def run_tick(
                 f"order NOT sent for {sig.symbol}."
             )
 
-        orders_out.append(
-            {
-                "symbol": sig.symbol,
-                "side": sig.side,
-                "units": signed_units,
-                "entry": float(sig.entry),
-                "stop_loss": float(sig.stop_loss),
-                "take_profit": float(sig.take_profit),
-                "rr": float(sig.rr),
-                "comment": sig.comment,
-                "response": order_resp,
-            }
-        )
-
     return {
         "timestamp": now.isoformat(),
         "signals": signals_out,
+        "planned_orders": planned_out,
         "orders": orders_out,
     }
