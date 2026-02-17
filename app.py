@@ -501,7 +501,8 @@ async def health():
 async def liquidity_tick():
     """
     Runs Liquidity engine once.
-    If OANDA_ENV=practice and LIQUIDITY_TRADING_ENABLED=1, it will place paper trades.
+    If LIQUIDITY_TRADING_ENABLED=1, it will place trades against the configured
+    OANDA_ENV (practice or live).
     """
     try:
         broker = get_liquidity_broker()
@@ -516,7 +517,17 @@ async def liquidity_tick():
 
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    execute_trades = bool(enabled and oanda_env == "practice")
+
+    if enabled and oanda_env not in {"practice", "live"}:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "note": f"Invalid OANDA_ENV={oanda_env!r}. Expected 'practice' or 'live'.",
+            },
+        )
+
+    execute_trades = bool(enabled and oanda_env in {"practice", "live"})
 
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
     risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
@@ -537,12 +548,17 @@ async def liquidity_tick():
         _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
 
     signals_count = len(result.get("signals", []))
+    planned_count = len(result.get("planned_orders", []))
     orders_count = len(result.get("orders", []))
 
-    mode = "Mode: Paper (OANDA practice only)" if execute_trades else "Mode: Signals only"
+    if execute_trades:
+        mode = f"Mode: Execution enabled ({oanda_env})"
+    else:
+        mode = "Mode: Signals only"
 
     note = (
-        f"Signals: {signals_count} · Orders placed: {orders_count} · {mode}. "
+        f"Signals: {signals_count} · Planned: {planned_count} · "
+        f"Orders placed: {orders_count} · {mode}. "
         "If zero, it simply means no valid setup at this moment."
     )
 
@@ -551,6 +567,7 @@ async def liquidity_tick():
             "status": "ok",
             "timestamp_utc": result.get("timestamp"),
             "signals_found": signals_count,
+            "orders_planned": planned_count,
             "orders_placed": orders_count,
             "mode": mode,
             "note": note,
@@ -562,7 +579,11 @@ async def liquidity_tick():
 async def liquidity_recent():
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
     enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    mode = "Mode: Paper (OANDA practice only)" if (enabled and oanda_env == "practice") else "Mode: Signals only"
+    mode = (
+        f"Mode: Execution enabled ({oanda_env})"
+        if (enabled and oanda_env in {"practice", "live"})
+        else "Mode: Signals only"
+    )
 
     if not RECENT_LIQUIDITY:
         return JSONResponse(
@@ -575,9 +596,13 @@ async def liquidity_recent():
     last = RECENT_LIQUIDITY[-1]
     ts = last.get("timestamp", "")
     sigs = last.get("signals", [])
+    planned = last.get("planned_orders", [])
     orders = last.get("orders", [])
 
-    lines = [f"Last run: {ts}", f"Signals: {len(sigs)} · Orders: {len(orders)}"]
+    lines = [
+        f"Last run: {ts}",
+        f"Signals: {len(sigs)} · Planned: {len(planned)} · Orders: {len(orders)}",
+    ]
 
     if sigs:
         lines.append("")
