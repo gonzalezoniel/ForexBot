@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,6 +10,8 @@ from typing import List, Dict, Any, Optional
 import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
+
+logger = logging.getLogger("forexbot")
 
 # Import the strategy module so we can call forexbot_core.run_tick(...)
 import forexbot_core
@@ -479,6 +483,71 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# Background trading loops
+# ---------------------------------------------------------------------------
+
+async def _liquidity_loop():
+    interval = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
+    while True:
+        try:
+            broker = get_liquidity_broker()
+            oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
+            enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+            execute_trades = bool(enabled and oanda_env in {"practice", "live"})
+
+            balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
+            risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
+            max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
+            max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
+
+            result = await asyncio.to_thread(
+                forexbot_core.run_tick,
+                broker_client=broker,
+                balance=balance,
+                risk_pct_per_trade=risk_pct,
+                execute_trades=execute_trades,
+                max_units_fx=max_units_fx,
+                max_units_xau=max_units_xau,
+            )
+
+            _push_recent(RECENT_LIQUIDITY, result, max_len=25)
+            for o in result.get("orders", []):
+                _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+
+            signals_count = len(result.get("signals", []))
+            orders_count = len(result.get("orders", []))
+            logger.info(
+                f"Liquidity tick: signals={signals_count} orders={orders_count}"
+            )
+        except Exception as e:
+            logger.exception(f"Liquidity loop error: {e}")
+
+        await asyncio.sleep(interval)
+
+
+async def _chaosfx_loop():
+    interval = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
+    while True:
+        try:
+            engine = get_chaos_engine()
+            summary = await asyncio.to_thread(engine.run_once)
+            actions = len(summary.get("actions", []))
+            reason = summary.get("reason", "")
+            logger.info(f"ChaosFX tick: reason={reason} actions={actions}")
+        except Exception as e:
+            logger.exception(f"ChaosFX loop error: {e}")
+
+        await asyncio.sleep(interval)
+
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting background trading loops")
+    asyncio.create_task(_liquidity_loop())
+    asyncio.create_task(_chaosfx_loop())
 
 
 # ---------------------------------------------------------------------------
