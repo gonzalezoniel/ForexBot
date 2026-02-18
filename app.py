@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
+import math
 
 import requests
 from fastapi import FastAPI
@@ -249,12 +250,104 @@ class OandaBroker(BrokerClient):
             return {"status": "error", "detail": str(e), "payload": order_payload}
 
 
-def get_liquidity_broker() -> OandaBroker:
+class DummyLiquidityBroker(BrokerClient):
+    """Synthetic broker for local/testing runs when OANDA creds are unavailable."""
+
+    BASE_PRICE = {
+        "EURGBP": 0.8560,
+        "GBPCAD": 1.7120,
+        "XAUUSD": 2320.0,
+    }
+
+    SPREAD = {
+        "EURGBP": 0.00018,
+        "GBPCAD": 0.00028,
+        "XAUUSD": 0.22,
+    }
+
+    STEP_BY_TF = {
+        "5M": timedelta(minutes=5),
+        "1H": timedelta(hours=1),
+        "4H": timedelta(hours=4),
+    }
+
+    AMP_BY_SYMBOL = {
+        "EURGBP": 0.00055,
+        "GBPCAD": 0.0011,
+        "XAUUSD": 3.2,
+    }
+
+    def get_ohlc(self, symbol: str, timeframe: str, limit: int) -> List[dict]:
+        if symbol not in self.BASE_PRICE:
+            return []
+        step = self.STEP_BY_TF.get(timeframe)
+        if step is None or limit <= 0:
+            return []
+
+        now = datetime.now(timezone.utc)
+        base = self.BASE_PRICE[symbol]
+        amp = self.AMP_BY_SYMBOL[symbol]
+        candles: List[dict] = []
+
+        for i in range(limit):
+            idx = i - limit
+            t = now + (idx * step)
+            phase = (i / 8.0)
+            drift = (i / max(limit, 1)) * amp * 0.15
+            center = base + amp * math.sin(phase) + drift
+            o = center - amp * 0.18
+            c = center + amp * 0.18
+            h = max(o, c) + amp * 0.22
+            l = min(o, c) - amp * 0.22
+            candles.append(
+                {
+                    "timestamp": t,
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                }
+            )
+        return candles
+
+    def get_quote(self, symbol: str) -> Quote:
+        mid = self.BASE_PRICE.get(symbol, 1.0)
+        spread = self.SPREAD.get(symbol, 0.0002)
+        return Quote(bid=mid - (spread / 2), ask=mid + (spread / 2))
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        units: int,
+        entry: float,
+        stop_loss: float,
+        take_profit: float,
+    ):
+        return {
+            "status": "ok",
+            "simulated": True,
+            "symbol": symbol,
+            "side": side,
+            "units": units,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
+
+
+def get_liquidity_broker() -> BrokerClient:
     """
-    HARD REQUIREMENT:
-    Liquidity engine must use OANDA. No DummyBroker fallback.
-    This prevents silent 'it ran but didn't trade' behavior.
+    Broker selector for liquidity engine.
+
+    - Default: OANDA broker (real market data/orders)
+    - Test mode: synthetic broker when LIQUIDITY_TEST_MODE=1
     """
+    test_mode = os.getenv("LIQUIDITY_TEST_MODE", "0").strip() == "1"
+    if test_mode:
+        print("[LiquidityBroker] Using DummyLiquidityBroker (test mode)")
+        return DummyLiquidityBroker()
+
     api_key = os.getenv("OANDA_API_KEY", "").strip()
     account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
 
@@ -288,6 +381,57 @@ def get_chaos_engine() -> ChaosEngineFX:
 
 RECENT_LIQUIDITY: List[Dict[str, Any]] = []
 RECENT_LIQUIDITY_TRADES: List[Dict[str, Any]] = []
+
+
+def _is_valid_oanda_env(oanda_env: str) -> bool:
+    return oanda_env in {"practice", "live"}
+
+
+def _should_execute_liquidity_orders(env_state: Dict[str, Any]) -> bool:
+    if not env_state.get("enabled", False):
+        return False
+    if env_state.get("test_mode", False):
+        return True
+    return bool(env_state.get("env_valid", False))
+
+
+def _liquidity_env_state() -> Dict[str, Any]:
+    """Compute liquidity runtime configuration health for API/status surfaces."""
+    oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
+    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+    test_mode = os.getenv("LIQUIDITY_TEST_MODE", "0").strip() == "1"
+    api_key = os.getenv("OANDA_API_KEY", "").strip()
+    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+
+    missing: List[str] = []
+    if not api_key:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+
+    env_valid = _is_valid_oanda_env(oanda_env)
+
+    if test_mode:
+        mode = (
+            "Mode: Test broker execution enabled (synthetic market)"
+            if enabled
+            else "Mode: Test broker signals only (synthetic market)"
+        )
+    else:
+        mode = (
+            f"Mode: Execution enabled ({oanda_env})"
+            if (enabled and env_valid)
+            else "Mode: Signals only"
+        )
+
+    return {
+        "test_mode": test_mode,
+        "oanda_env": oanda_env,
+        "enabled": enabled,
+        "missing": missing,
+        "env_valid": env_valid,
+        "mode": mode,
+    }
 
 
 def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int = 25):
@@ -501,8 +645,27 @@ async def health():
 async def liquidity_tick():
     """
     Runs Liquidity engine once.
-    If OANDA_ENV=practice and LIQUIDITY_TRADING_ENABLED=1, it will place paper trades.
+    If LIQUIDITY_TRADING_ENABLED=1, it will place trades against the configured
+    OANDA_ENV (practice or live).
     """
+    env_state = _liquidity_env_state()
+    oanda_env = env_state["oanda_env"]
+    enabled = env_state["enabled"]
+
+    if (not env_state["test_mode"]) and env_state["missing"]:
+        missing = ", ".join(env_state["missing"])
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "mode": "Mode: Configuration error",
+                "note": (
+                    "Liquidity broker credentials missing: "
+                    f"{missing}. Set env vars and redeploy."
+                ),
+            },
+        )
+
     try:
         broker = get_liquidity_broker()
     except Exception as e:
@@ -510,13 +673,22 @@ async def liquidity_tick():
             status_code=500,
             content={
                 "status": "error",
+                "mode": "Mode: Configuration error",
                 "note": f"Liquidity broker error: {str(e)}",
             },
         )
 
-    oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    execute_trades = bool(enabled and oanda_env == "practice")
+    if (not env_state["test_mode"]) and enabled and not env_state["env_valid"]:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "mode": "Mode: Configuration error",
+                "note": f"Invalid OANDA_ENV={oanda_env!r}. Expected 'practice' or 'live'.",
+            },
+        )
+
+    execute_trades = _should_execute_liquidity_orders(env_state)
 
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
     risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
@@ -537,12 +709,14 @@ async def liquidity_tick():
         _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
 
     signals_count = len(result.get("signals", []))
+    planned_count = len(result.get("planned_orders", []))
     orders_count = len(result.get("orders", []))
 
-    mode = "Mode: Paper (OANDA practice only)" if execute_trades else "Mode: Signals only"
+    mode = env_state["mode"]
 
     note = (
-        f"Signals: {signals_count} · Orders placed: {orders_count} · {mode}. "
+        f"Signals: {signals_count} · Planned: {planned_count} · "
+        f"Orders placed: {orders_count} · {mode}. "
         "If zero, it simply means no valid setup at this moment."
     )
 
@@ -551,7 +725,10 @@ async def liquidity_tick():
             "status": "ok",
             "timestamp_utc": result.get("timestamp"),
             "signals_found": signals_count,
+            "orders_planned": planned_count,
             "orders_placed": orders_count,
+            "execute_trades": execute_trades,
+            "test_mode": env_state["test_mode"],
             "mode": mode,
             "note": note,
         }
@@ -560,9 +737,26 @@ async def liquidity_tick():
 
 @app.get("/api/liquidity/recent", response_class=JSONResponse)
 async def liquidity_recent():
-    oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
-    mode = "Mode: Paper (OANDA practice only)" if (enabled and oanda_env == "practice") else "Mode: Signals only"
+    env_state = _liquidity_env_state()
+    mode = env_state["mode"]
+
+    def _fmt_price(v: Any) -> str:
+        try:
+            return f"{float(v):.5f}"
+        except Exception:
+            return "n/a"
+
+    if (not env_state["test_mode"]) and env_state["enabled"] and env_state["missing"]:
+        missing = ", ".join(env_state["missing"])
+        return JSONResponse(
+            {
+                "mode": "Mode: Configuration error",
+                "text": (
+                    "Liquidity execution requested but broker credentials are missing: "
+                    f"{missing}. Add these env vars and redeploy."
+                ),
+            }
+        )
 
     if not RECENT_LIQUIDITY:
         return JSONResponse(
@@ -575,9 +769,13 @@ async def liquidity_recent():
     last = RECENT_LIQUIDITY[-1]
     ts = last.get("timestamp", "")
     sigs = last.get("signals", [])
+    planned = last.get("planned_orders", [])
     orders = last.get("orders", [])
 
-    lines = [f"Last run: {ts}", f"Signals: {len(sigs)} · Orders: {len(orders)}"]
+    lines = [
+        f"Last run: {ts}",
+        f"Signals: {len(sigs)} · Planned: {len(planned)} · Orders: {len(orders)}",
+    ]
 
     if sigs:
         lines.append("")
@@ -585,8 +783,8 @@ async def liquidity_recent():
         for s in sigs[:6]:
             lines.append(
                 f"- {s.get('symbol')} {str(s.get('side')).upper()} "
-                f"entry={s.get('entry'):.5f} SL={s.get('stop_loss'):.5f} "
-                f"TP={s.get('take_profit'):.5f} RR={s.get('rr')}"
+                f"entry={_fmt_price(s.get('entry'))} SL={_fmt_price(s.get('stop_loss'))} "
+                f"TP={_fmt_price(s.get('take_profit'))} RR={s.get('rr', 'n/a')}"
             )
 
     if orders:
