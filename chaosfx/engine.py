@@ -221,6 +221,7 @@ class ChaosEngineFX:
             )
 
         # ---- EXECUTE ON TOP-K CANDIDATES WITH REAL SIGNALS ----
+        open_trade_count = len(open_trades)
         for a in candidate_list[: settings.VOLATILITY_TOP_K]:
             pair = a["pair"]
             signal: Signal = a["signal"]
@@ -294,8 +295,8 @@ class ChaosEngineFX:
                     f"surge={surge_for_this_pair} reason={signal.reason}"
                 )
 
-                open_trades = self.client.get_open_trades()
-                if len(open_trades) >= settings.MAX_OPEN_TRADES:
+                open_trade_count += 1
+                if open_trade_count >= settings.MAX_OPEN_TRADES:
                     logger.info("Reached MAX_OPEN_TRADES during execution; stopping")
                     break
 
