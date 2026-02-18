@@ -422,6 +422,11 @@ def _liquidity_env_state() -> Dict[str, Any]:
     }
 
 
+def _should_execute_liquidity_orders(env_state: Dict[str, Any]) -> bool:
+    """True when order submission should be attempted for this tick."""
+    return bool(env_state["enabled"] and (env_state["test_mode"] or env_state["env_valid"]))
+
+
 def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int = 25):
     buf.append(item)
     if len(buf) > max_len:
@@ -676,9 +681,7 @@ async def liquidity_tick():
             },
         )
 
-    execute_trades = bool(
-        enabled and (env_state["test_mode"] or env_state["env_valid"])
-    )
+    execute_trades = _should_execute_liquidity_orders(env_state)
 
     balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
     risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
@@ -719,6 +722,7 @@ async def liquidity_tick():
             "orders_placed": orders_count,
             "execute_trades": execute_trades,
             "test_mode": env_state["test_mode"],
+            "oanda_env": env_state["oanda_env"],
             "mode": mode,
             "note": note,
         }
@@ -744,6 +748,17 @@ async def liquidity_recent():
                 "text": (
                     "Liquidity execution requested but broker credentials are missing: "
                     f"{missing}. Add these env vars and redeploy."
+                ),
+            }
+        )
+
+    if (not env_state["test_mode"]) and env_state["enabled"] and (not env_state["env_valid"]):
+        return JSONResponse(
+            {
+                "mode": "Mode: Configuration error",
+                "text": (
+                    f"Invalid OANDA_ENV={env_state['oanda_env']!r}. "
+                    "Expected 'practice' or 'live'."
                 ),
             }
         )
