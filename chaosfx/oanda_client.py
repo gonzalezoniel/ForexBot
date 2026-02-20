@@ -9,6 +9,11 @@ class OandaClient:
         self.account_id = settings.OANDA_ACCOUNT_ID
         self.env = settings.OANDA_ENV
 
+        if not self.api_key or not self.account_id:
+            raise RuntimeError(
+                "OANDA_API_KEY and OANDA_ACCOUNT_ID must be set as environment variables."
+            )
+
         if self.env == "live":
             self.base_url = "https://api-fxtrade.oanda.com/v3"
         else:

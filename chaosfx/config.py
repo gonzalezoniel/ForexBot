@@ -5,7 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Pydantic v2 settings config
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # General
     ENV: str = Field("dev", description="Environment name")
@@ -49,9 +51,9 @@ class Settings(BaseSettings):
     # Recent trades memory
     RECENT_TRADES_LIMIT: int = 20
 
-    # Oanda API
-    OANDA_API_KEY: str
-    OANDA_ACCOUNT_ID: str
+    # Oanda API (set via environment variables or .env file)
+    OANDA_API_KEY: str = ""
+    OANDA_ACCOUNT_ID: str = ""
     OANDA_ENV: str = "practice"
 
     # Liquidity engine toggle (used by app.py)
