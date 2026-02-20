@@ -627,8 +627,14 @@ async def liquidity_recent():
 
 @app.post("/api/chaosfx/tick", response_class=JSONResponse)
 async def chaosfx_tick():
-    engine = get_chaos_engine()
-    summary = engine.run_once()
+    try:
+        engine = get_chaos_engine()
+        summary = engine.run_once()
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "reason": str(e), "actions": 0},
+        )
     return JSONResponse(
         {
             "status": "ok",
@@ -643,7 +649,16 @@ async def chaosfx_tick():
 
 @app.get("/api/chaosfx/status", response_class=JSONResponse)
 async def chaosfx_status():
-    engine = get_chaos_engine()
+    try:
+        engine = get_chaos_engine()
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "summary_text": f"ChaosFX error: {e}",
+                "trades_text": "Engine not available.",
+            },
+        )
     last = engine.last_summary or {}
     trades = engine.recent_trades or []
 
