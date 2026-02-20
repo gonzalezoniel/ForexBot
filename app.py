@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -9,11 +12,81 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# Import the strategy module so we can call forexbot_core.run_tick(...)
 import forexbot_core
-
-# ChaosFX engine
 from chaosfx.engine import ChaosEngineFX
+from chaosfx.config import settings
+
+logger = logging.getLogger("forexbot.scheduler")
+
+SCHEDULER_INTERVAL = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
+
+
+async def _background_loop():
+    logger.info(
+        "Background scheduler started (interval=%ds)", SCHEDULER_INTERVAL
+    )
+    await asyncio.sleep(5)
+    while True:
+        # --- Liquidity engine ---
+        try:
+            broker = get_liquidity_broker()
+            oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
+            enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+            execute_trades = bool(enabled and oanda_env in {"practice", "live"})
+
+            result = forexbot_core.run_tick(
+                broker_client=broker,
+                balance=float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000")),
+                risk_pct_per_trade=float(os.getenv("LIQUIDITY_RISK_PCT", "0.5")),
+                execute_trades=execute_trades,
+                max_units_fx=int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000")),
+                max_units_xau=int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20")),
+            )
+            _push_recent(RECENT_LIQUIDITY, result, max_len=25)
+            for o in result.get("orders", []):
+                _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+            sigs = len(result.get("signals", []))
+            ords = len(result.get("orders", []))
+            logger.info("[Liquidity] signals=%d orders=%d", sigs, ords)
+        except Exception:
+            logger.exception("Liquidity tick failed")
+
+        # --- ChaosFX engine ---
+        try:
+            engine = get_chaos_engine()
+            summary = engine.run_once()
+            logger.info(
+                "[ChaosFX] reason=%s actions=%d",
+                summary.get("reason"),
+                len(summary.get("actions", [])),
+            )
+        except Exception:
+            logger.exception("ChaosFX tick failed")
+
+        await asyncio.sleep(SCHEDULER_INTERVAL)
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+    api_key = os.getenv("OANDA_API_KEY", "").strip()
+    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+    if api_key and account_id:
+        task = asyncio.create_task(_background_loop())
+        logger.info("Scheduler task created")
+    else:
+        logger.warning(
+            "OANDA keys not set; background scheduler disabled. "
+            "Set OANDA_API_KEY and OANDA_ACCOUNT_ID to enable."
+        )
+    yield
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Scheduler task stopped")
 
 
 app = FastAPI(
@@ -24,6 +97,7 @@ app = FastAPI(
         "Liquidity Sweep (EURGBP/XAUUSD/GBPCAD HTF bias + 5M sweeps) + "
         "ChaosEngine-FX (volatility/confidence execution)."
     ),
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
