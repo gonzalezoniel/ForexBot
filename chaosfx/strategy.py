@@ -222,8 +222,9 @@ def _pip_factor(instrument: str) -> float:
     """
     if "JPY" in instrument:
         return 0.01
-    else:
-        return 0.0001
+    if "XAU" in instrument:
+        return 0.01
+    return 0.0001
 
 
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:

@@ -114,7 +114,7 @@ class ChaosEngineFX:
 
         if not self._can_trade():
             summary = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": equity,
                 "actions": [],
                 "reason": "daily_drawdown_limit_reached",
@@ -128,7 +128,7 @@ class ChaosEngineFX:
         if len(open_trades) >= settings.MAX_OPEN_TRADES:
             logger.info("Max open trades reached, skipping new entries")
             summary = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": equity,
                 "actions": [],
                 "reason": "max_open_trades_reached",
@@ -176,7 +176,7 @@ class ChaosEngineFX:
         surge_mode = False
         if not in_session and not extreme_pairs:
             summary = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": equity,
                 "actions": [],
                 "reason": "outside_session_hours",
@@ -199,7 +199,7 @@ class ChaosEngineFX:
 
         if not hot:
             summary = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": equity,
                 "actions": [],
                 "reason": "no_pairs_above_vol_threshold",
@@ -268,7 +268,7 @@ class ChaosEngineFX:
                     take_profit_price=signal.take_profit,
                 )
 
-                trade_time = datetime.utcnow().isoformat()
+                trade_time = datetime.now(timezone.utc).isoformat()
 
                 action_info = {
                     "pair": pair,
@@ -304,7 +304,7 @@ class ChaosEngineFX:
 
         reason = "completed" if actions else "no_valid_signals_in_hot_pairs"
         summary = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "equity": equity,
             "actions": actions,
             "reason": reason,
