@@ -1,6 +1,5 @@
 from typing import Tuple
 from chaosfx.config import settings
-from chaosfx.strategy import _pip_factor
 
 
 def compute_position_size(
