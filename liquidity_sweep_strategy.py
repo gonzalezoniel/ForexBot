@@ -8,6 +8,12 @@ from datetime import datetime, time
 Symbol = Literal["EURGBP", "XAUUSD", "GBPCAD"]
 Side = Literal["long", "short"]
 
+PIP_FACTOR: Dict[str, float] = {
+    "EURGBP": 0.0001,
+    "XAUUSD": 0.01,
+    "GBPCAD": 0.0001,
+}
+
 
 @dataclass
 class Candle:
@@ -367,9 +373,11 @@ def generate_signals(market: MarketDataInterface, now_utc: datetime) -> List[Sig
     for symbol in ("EURGBP", "XAUUSD", "GBPCAD"):
         cfg = PAIR_CONFIG[symbol]
 
-        # --- Spread filter ---
-        spread = market.get_spread(symbol)
-        if spread > cfg.max_spread:
+        # --- Spread filter (convert raw spread to pips) ---
+        raw_spread = market.get_spread(symbol)
+        pip_f = PIP_FACTOR.get(symbol, 0.0001)
+        spread_in_pips = raw_spread / pip_f if pip_f > 0 else float("inf")
+        if spread_in_pips > cfg.max_spread:
             continue
 
         # --- Get candles ---

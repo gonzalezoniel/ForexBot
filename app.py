@@ -16,7 +16,11 @@ import forexbot_core
 from chaosfx.engine import ChaosEngineFX
 from chaosfx.config import settings
 
-logger = logging.getLogger("forexbot.scheduler")
+logger = logging.getLogger("forexbot")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+)
 
 SCHEDULER_INTERVAL = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
 
@@ -244,24 +248,20 @@ class OandaBroker(BrokerClient):
         url = f"{self.base_url}/accounts/{self.account_id}/pricing"
         params = {"instruments": instrument}
 
-        try:
-            resp = self.session.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"[OandaBroker] get_quote error for {symbol}: {e}")
-            return Quote(bid=0.0, ask=0.0)
+        resp = self.session.get(url, params=params, timeout=10)
+        resp.raise_for_status()
 
         data = resp.json()
         prices = data.get("prices", [])
         if not prices:
-            return Quote(bid=0.0, ask=0.0)
+            raise RuntimeError(f"No pricing data returned for {symbol}")
 
         p = prices[0]
-        try:
-            bid = float(p["bids"][0]["price"])
-            ask = float(p["asks"][0]["price"])
-        except Exception:
-            return Quote(bid=0.0, ask=0.0)
+        bid = float(p["bids"][0]["price"])
+        ask = float(p["asks"][0]["price"])
+
+        if bid <= 0 or ask <= 0:
+            raise RuntimeError(f"Invalid quote for {symbol}: bid={bid} ask={ask}")
 
         return Quote(bid=bid, ask=ask)
 
@@ -298,29 +298,32 @@ class OandaBroker(BrokerClient):
             }
         }
 
-        if stop_loss:
+        if stop_loss is not None:
             order_payload["order"]["stopLossOnFill"] = {"price": f"{stop_loss:.5f}"}
-        if take_profit:
+        if take_profit is not None:
             order_payload["order"]["takeProfitOnFill"] = {"price": f"{take_profit:.5f}"}
 
         url = f"{self.base_url}/accounts/{self.account_id}/orders"
 
-        try:
-            resp = self.session.post(url, json=order_payload, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            print(
-                f"[OandaBroker] ORDER SENT ({self.env}) "
-                f"{symbol} {side.upper()} units={u} "
-                f"SL={stop_loss:.5f} TP={take_profit:.5f}"
+        resp = self.session.post(url, json=order_payload, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if "orderCancelTransaction" in data:
+            reason = data["orderCancelTransaction"].get("reason", "UNKNOWN")
+            logger.error(
+                "ORDER REJECTED (%s) %s %s units=%d reason=%s",
+                self.env, symbol, side.upper(), u, reason,
             )
-            return {"status": "ok", "raw": data}
-        except Exception as e:
-            print(
-                f"[OandaBroker] ERROR sending order for {symbol}: {e} "
-                f"payload={order_payload}"
-            )
-            return {"status": "error", "detail": str(e), "payload": order_payload}
+            return {"status": "rejected", "reason": reason, "raw": data}
+
+        logger.info(
+            "ORDER FILLED (%s) %s %s units=%d SL=%s TP=%s",
+            self.env, symbol, side.upper(), u,
+            f"{stop_loss:.5f}" if stop_loss is not None else "none",
+            f"{take_profit:.5f}" if take_profit is not None else "none",
+        )
+        return {"status": "ok", "raw": data}
 
 
 def get_liquidity_broker() -> OandaBroker:
@@ -338,7 +341,7 @@ def get_liquidity_broker() -> OandaBroker:
         )
 
     broker = OandaBroker()
-    print("[LiquidityBroker] Using OandaBroker")
+    logger.info("LiquidityBroker: Using OandaBroker (env=%s)", broker.env)
     return broker
 
 

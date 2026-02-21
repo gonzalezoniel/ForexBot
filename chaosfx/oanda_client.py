@@ -1,6 +1,10 @@
+import logging
+
 import httpx
 from typing import Dict, Any, List, Optional
 from chaosfx.config import settings
+
+logger = logging.getLogger("chaosfx.oanda")
 
 
 class OandaClient:
@@ -80,7 +84,17 @@ class OandaClient:
 
         resp = self._client.post(f"/accounts/{self.account_id}/orders", json=order)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+
+        if "orderCancelTransaction" in data:
+            reason = data["orderCancelTransaction"].get("reason", "UNKNOWN")
+            logger.error(
+                "ORDER REJECTED %s units=%d reason=%s", instrument, units, reason,
+            )
+            return {"status": "rejected", "reason": reason, "raw": data}
+
+        logger.info("ORDER FILLED %s units=%d", instrument, units)
+        return data
 
     def close_trade(self, trade_id: str) -> Dict[str, Any]:
         resp = self._client.put(

@@ -10,27 +10,18 @@ def compute_position_size(
     entry_price: float,
 ) -> int:
     """
-    Basic fixed-% risk per trade, convert into units.
+    Fixed-% risk per trade, convert into OANDA units.
 
-    Risk = RISK_PER_TRADE * equity
-    Pip risk = |entry - stop| in decimal
-    Units = Risk / pip_value
-    Approximation assuming 1 pip value ~ 0.0001 * units (or 0.01 for JPY)
+    For OANDA, 1 unit = 1 of the base currency.  P&L for a price move of
+    ``stop_distance`` is approximately ``units * stop_distance`` in the quote
+    currency.  Therefore: units = risk_amount / stop_distance.
     """
     risk_amount = account_balance * settings.RISK_PER_TRADE
-    pip_factor = _pip_factor(instrument)
-
-    pip_risk = abs(entry_price - stop_loss_price) / pip_factor
-    if pip_risk <= 0:
+    stop_distance = abs(entry_price - stop_loss_price)
+    if stop_distance <= 0:
         return 0
 
-    # Value per pip per unit ~ pip_factor (very rough)
-    # So pip_value_per_unit ~ pip_factor
-    # risk_amount = units * pip_risk * pip_factor -> units = risk_amount / (pip_risk * pip_factor)
-    pip_value_per_unit = pip_factor
-    units = risk_amount / (pip_risk * pip_value_per_unit)
-
-    # Oanda allows fractional, but we cast to int
+    units = risk_amount / stop_distance
     return int(units)
 
 

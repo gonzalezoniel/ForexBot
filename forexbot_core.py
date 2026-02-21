@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Set
 
 from liquidity_sweep_strategy import (
     MarketDataInterface,
@@ -11,6 +13,11 @@ from liquidity_sweep_strategy import (
     generate_signals,
     Symbol,
 )
+
+logger = logging.getLogger("forexbot.liquidity")
+
+SYMBOL_COOLDOWN_SECONDS = 300
+_last_order_time: Dict[str, float] = {}
 
 
 @dataclass
@@ -84,17 +91,22 @@ def _calc_position_size(
     pip_value: float,
 ) -> float:
     """
-    Very rough position size calculator.
+    Position size calculator for OANDA.
+
+    For OANDA, 1 unit = 1 of the base currency. P&L per unit for a move
+    of ``stop_distance`` in price is approximately ``stop_distance`` in the
+    quote currency.  So: units = risk_amount / stop_distance.
 
     risk_pct is in percent (0.5 = 0.5% of balance).
+    pip_value is kept as a parameter for future per-pip-value refinement but
+    is not used in the core formula.
     """
     risk_amount = balance * (risk_pct / 100.0)
     stop_distance = abs(entry - stop_loss)
     if stop_distance <= 0:
         return 0.0
 
-    # size * stop_distance * pip_value = risk_amount
-    size = risk_amount / (stop_distance * pip_value)
+    size = risk_amount / stop_distance
     return max(size, 0.0)
 
 
@@ -135,7 +147,7 @@ def run_tick(
     signals: List[Signal] = generate_signals(market, now)
 
     if not signals:
-        print(f"[{now.isoformat()}] Liquidity: no signals.")
+        logger.info("Liquidity: no signals.")
         return {"timestamp": now.isoformat(), "signals": [], "planned_orders": [], "orders": []}
 
     signals_out: List[Dict[str, Any]] = []
@@ -143,11 +155,10 @@ def run_tick(
     planned_out: List[Dict[str, Any]] = []
 
     for sig in signals:
-        # --- Log the signal ---
-        print(
-            f"[{now.isoformat()}] LIQ SIGNAL: {sig.symbol} {sig.side.upper()} "
-            f"entry={sig.entry:.5f} SL={sig.stop_loss:.5f} "
-            f"TP={sig.take_profit:.5f} RR={sig.rr} | {sig.comment}"
+        logger.info(
+            "LIQ SIGNAL: %s %s entry=%.5f SL=%.5f TP=%.5f RR=%s | %s",
+            sig.symbol, sig.side.upper(), sig.entry, sig.stop_loss,
+            sig.take_profit, sig.rr, sig.comment,
         )
 
         signals_out.append(
@@ -164,10 +175,10 @@ def run_tick(
 
         # --- Position sizing ---
         if sig.symbol == "XAUUSD":
-            pip_value = 1.0
+            pip_factor = 0.01
             max_units = max_units_xau
         else:
-            pip_value = 0.0001
+            pip_factor = 0.0001
             max_units = max_units_fx
 
         size = _calc_position_size(
@@ -175,18 +186,26 @@ def run_tick(
             risk_pct=risk_pct_per_trade,
             entry=sig.entry,
             stop_loss=sig.stop_loss,
-            pip_value=pip_value,
+            pip_value=pip_factor,
         )
 
         units = int(size)
         if units <= 0:
-            print(
-                f"[{now.isoformat()}] Liquidity: size <= 0 for {sig.symbol}, skip order."
-            )
+            logger.info("Liquidity: size <= 0 for %s, skip order.", sig.symbol)
             continue
 
         if units > max_units:
             units = max_units
+
+        # --- Duplicate / cooldown guard ---
+        now_ts = _time.monotonic()
+        last_ts = _last_order_time.get(sig.symbol, 0.0)
+        if now_ts - last_ts < SYMBOL_COOLDOWN_SECONDS:
+            logger.info(
+                "Liquidity: %s still in cooldown (%ds remaining), skip.",
+                sig.symbol, int(SYMBOL_COOLDOWN_SECONDS - (now_ts - last_ts)),
+            )
+            continue
 
         # For OANDA: positive = buy, negative = sell
         if sig.side == "short":
@@ -194,9 +213,9 @@ def run_tick(
         else:
             signed_units = abs(units)
 
-        print(
-            f"[{now.isoformat()}] Liquidity: computed units={signed_units} "
-            f"for {sig.symbol} risk={risk_pct_per_trade}%."
+        logger.info(
+            "Liquidity: computed units=%d for %s risk=%.1f%%",
+            signed_units, sig.symbol, risk_pct_per_trade,
         )
 
         plan_payload = {
@@ -222,10 +241,11 @@ def run_tick(
                     stop_loss=float(sig.stop_loss),
                     take_profit=float(sig.take_profit),
                 )
-                print(
-                    f"[{now.isoformat()}] Liquidity: order sent for {sig.symbol}, "
-                    f"response={order_resp}"
+                logger.info(
+                    "Liquidity: order sent for %s, response=%s",
+                    sig.symbol, order_resp,
                 )
+                _last_order_time[sig.symbol] = _time.monotonic()
                 orders_out.append(
                     {
                         **plan_payload,
@@ -234,9 +254,8 @@ def run_tick(
                 )
             except Exception as e:
                 order_resp = {"status": "error", "detail": str(e)}
-                print(
-                    f"[{now.isoformat()}] Liquidity: ERROR placing order for "
-                    f"{sig.symbol}: {e}"
+                logger.exception(
+                    "Liquidity: ERROR placing order for %s", sig.symbol,
                 )
                 orders_out.append(
                     {
@@ -245,9 +264,9 @@ def run_tick(
                     }
                 )
         else:
-            print(
-                f"[{now.isoformat()}] Liquidity: execute_trades=False, "
-                f"order NOT sent for {sig.symbol}."
+            logger.info(
+                "Liquidity: execute_trades=False, order NOT sent for %s.",
+                sig.symbol,
             )
 
     return {
