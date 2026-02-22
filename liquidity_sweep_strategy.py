@@ -418,7 +418,11 @@ def generate_signals(market: MarketDataInterface, now_utc: datetime) -> List[Sig
         last = candles_5m[-1]
         entry = last.close
         rr = _choose_rr(symbol, sweep)
-        sl, tp = _calc_sl_tp(entry, sweep.side, sweep, rr, buffer_points=0.0)
+        # Add a small buffer beyond the sweep wick so SL isn't right at the
+        # liquidity level.  For XAU use a wider buffer (price is ~2000).
+        pip_f = PIP_FACTOR.get(symbol, 0.0001)
+        buffer = 3.0 * pip_f  # 3 pips / 3 points buffer
+        sl, tp = _calc_sl_tp(entry, sweep.side, sweep, rr, buffer_points=buffer)
 
         sig = Signal(
             symbol=symbol,
