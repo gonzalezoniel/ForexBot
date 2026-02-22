@@ -65,8 +65,8 @@ class Settings(BaseSettings):
     DEFAULT_TP_PIPS: float = 30.0
 
     # ATR-based dynamic SL/TP (multipliers of ATR)
-    ATR_SL_MULTIPLIER: float = 1.2
-    ATR_TP_MULTIPLIER: float = 2.0
+    ATR_SL_MULTIPLIER: float = 1.5   # was 1.2 — wider SL to reduce premature stop-outs
+    ATR_TP_MULTIPLIER: float = 2.4   # was 2.0 — keep RR roughly the same (~1.6:1)
 
 
 settings = Settings()

@@ -19,6 +19,25 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
+def _is_forex_market_open() -> bool:
+    """
+    Returns True when the forex market is actually open.
+    Forex trades Sun 17:00 ET (22:00 UTC) through Fri 17:00 ET (22:00 UTC).
+    Closed Fri 22:00 UTC → Sun 22:00 UTC.
+    """
+    now = datetime.now(timezone.utc)
+    wd = now.weekday()  # Mon=0 … Sun=6
+    hour = now.hour
+
+    if wd == 5:                       # Saturday
+        return False
+    if wd == 6 and hour < 22:         # Sunday before open
+        return False
+    if wd == 4 and hour >= 22:        # Friday after close
+        return False
+    return True
+
+
 def _in_trading_session() -> bool:
     """
     Rough session filter: by default trade only between SESSION_UTC_START_HOUR
@@ -101,6 +120,19 @@ class ChaosEngineFX:
         Returns summary for logging / API.
         """
         self._refresh_daily_equity_anchor()
+
+        # --- Market hours guard (weekend) ---
+        if not _is_forex_market_open():
+            logger.info("Forex market is closed (weekend), skipping cycle.")
+            summary = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "equity": 0.0,
+                "actions": [],
+                "reason": "market_closed",
+                "surge_mode": False,
+            }
+            self._record_run(summary)
+            return summary
 
         account = self.client.get_account_summary()
         equity = float(account["NAV"])

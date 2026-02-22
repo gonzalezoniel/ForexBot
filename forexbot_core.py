@@ -6,6 +6,35 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Dict, Set
 
+logger = logging.getLogger("forexbot.liquidity")
+
+
+def _is_forex_market_open(now_utc: datetime) -> bool:
+    """
+    Returns True if the forex market is open.
+
+    Forex trades Sun 17:00 ET (22:00 UTC) through Fri 17:00 ET (22:00 UTC).
+    This means the market is CLOSED from Friday 22:00 UTC to Sunday 22:00 UTC.
+
+    weekday(): Mon=0 … Sun=6
+    """
+    wd = now_utc.weekday()
+    hour = now_utc.hour
+
+    # Saturday: always closed
+    if wd == 5:
+        return False
+
+    # Sunday: closed until 22:00 UTC
+    if wd == 6 and hour < 22:
+        return False
+
+    # Friday: closed after 22:00 UTC
+    if wd == 4 and hour >= 22:
+        return False
+
+    return True
+
 from liquidity_sweep_strategy import (
     MarketDataInterface,
     Candle,
@@ -13,8 +42,6 @@ from liquidity_sweep_strategy import (
     generate_signals,
     Symbol,
 )
-
-logger = logging.getLogger("forexbot.liquidity")
 
 SYMBOL_COOLDOWN_SECONDS = 300
 _last_order_time: Dict[str, float] = {}
@@ -144,6 +171,11 @@ def run_tick(
     market = MyMarket(broker_client)
     now = datetime.now(timezone.utc)
 
+    # --- Market hours guard ---
+    if not _is_forex_market_open(now):
+        logger.info("Liquidity: forex market is closed (weekend), skipping tick.")
+        return {"timestamp": now.isoformat(), "signals": [], "planned_orders": [], "orders": []}
+
     signals: List[Signal] = generate_signals(market, now)
 
     if not signals:
@@ -257,6 +289,8 @@ def run_tick(
                 logger.exception(
                     "Liquidity: ERROR placing order for %s", sig.symbol,
                 )
+                # Set cooldown on failure too so we don't spam rejected orders
+                _last_order_time[sig.symbol] = _time.monotonic()
                 orders_out.append(
                     {
                         **plan_payload,
