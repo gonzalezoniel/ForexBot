@@ -270,9 +270,9 @@ class TestChaosRisk:
             stop_loss_price=1.0785,
             entry_price=1.0800,
         )
-        # risk = 10000 * 0.01 = 100, stop = 0.0015
-        # units = 100 / 0.0015 = 66_666
-        assert 60_000 < units < 70_000
+        # AGGRESSIVE MODE: risk = 10000 * 0.02 = 200, stop = 0.0015
+        # units = 200 / 0.0015 = 133_333
+        assert 130_000 < units < 140_000
 
     def test_zero_stop_returns_zero(self):
         from chaosfx.risk import compute_position_size
@@ -288,10 +288,10 @@ class TestChaosRisk:
     def test_daily_drawdown_exceeded(self):
         from chaosfx.risk import daily_drawdown_exceeded
 
-        exceeded, dd = daily_drawdown_exceeded(equity=9600, start_of_day_equity=10000)
-        # drawdown = (10000-9600)/10000 = 0.04 > 0.03
+        exceeded, dd = daily_drawdown_exceeded(equity=9300, start_of_day_equity=10000)
+        # AGGRESSIVE MODE: drawdown = (10000-9300)/10000 = 0.07 > 0.06
         assert exceeded is True
-        assert abs(dd - 0.04) < 0.001
+        assert abs(dd - 0.07) < 0.001
 
     def test_daily_drawdown_not_exceeded(self):
         from chaosfx.risk import daily_drawdown_exceeded
