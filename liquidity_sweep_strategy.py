@@ -244,33 +244,49 @@ def _detect_sweep(
     levels: List[LiquidityLevel],
     bias: str,
     cfg: LiquiditySweepConfig,
+    scan_window: int = 10,
 ) -> Optional[SweepResult]:
+    """
+    Scan the last ``scan_window`` candles (not just the very last one) for a
+    liquidity sweep.  This is essential because ``_confirm_bos`` needs at
+    least one candle *after* the sweep candle to confirm break-of-structure.
+    If we only ever checked the last candle, BOS could never be confirmed.
+
+    We iterate from most-recent backwards so that the earliest qualifying
+    sweep (with the most subsequent candles for BOS) is returned.
+    """
     if not candles_5m or not levels:
         return None
 
-    last = candles_5m[-1]
-    rng = last.high - last.low
-    if rng <= 0:
-        return None
+    best: Optional[SweepResult] = None
+    n = len(candles_5m)
+    window = min(scan_window, n)
 
-    upper_wick = last.high - max(last.open, last.close)
-    lower_wick = min(last.open, last.close) - last.low
-    upper_ratio = upper_wick / rng
-    lower_ratio = lower_wick / rng
+    for offset in range(window):
+        idx = n - 1 - offset
+        candle = candles_5m[idx]
+        rng = candle.high - candle.low
+        if rng <= 0:
+            continue
 
-    # For bullish bias we want a sweep BELOW (grab liquidity then go up)
-    if bias == "bullish" and lower_ratio >= cfg.min_wick_ratio:
-        for level in levels:
-            if last.low < level.price <= last.close:
-                return SweepResult(candle=last, level=level, side="long")
+        upper_wick = candle.high - max(candle.open, candle.close)
+        lower_wick = min(candle.open, candle.close) - candle.low
+        upper_ratio = upper_wick / rng
+        lower_ratio = lower_wick / rng
 
-    # For bearish bias we want a sweep ABOVE
-    if bias == "bearish" and upper_ratio >= cfg.min_wick_ratio:
-        for level in levels:
-            if last.high > level.price >= last.close:
-                return SweepResult(candle=last, level=level, side="short")
+        # For bullish bias we want a sweep BELOW (grab liquidity then go up)
+        if bias == "bullish" and lower_ratio >= cfg.min_wick_ratio:
+            for level in levels:
+                if candle.low < level.price <= candle.close:
+                    best = SweepResult(candle=candle, level=level, side="long")
 
-    return None
+        # For bearish bias we want a sweep ABOVE
+        if bias == "bearish" and upper_ratio >= cfg.min_wick_ratio:
+            for level in levels:
+                if candle.high > level.price >= candle.close:
+                    best = SweepResult(candle=candle, level=level, side="short")
+
+    return best
 
 
 def _confirm_bos(
