@@ -86,6 +86,8 @@ class ChaosEngineFX:
 
         # AGGRESSIVE MODE: Track closed trade outcomes for kill switch
         self.closed_trade_results: List[Dict[str, Any]] = []
+        # Timestamp (UTC) when the kill switch last triggered; None = not active
+        self._kill_switch_triggered_at: Optional[datetime] = None
 
         logger.info("ChaosEngine-FX AGGRESSIVE MODE initialized")
 
@@ -98,8 +100,12 @@ class ChaosEngineFX:
         if today != self.last_day:
             self.last_day = today
             self.start_of_day_equity = self._get_equity()
+            # Reset the kill-switch tracker so consecutive losses from the
+            # previous day don't permanently block trading.
+            self.closed_trade_results.clear()
             logger.info(
-                f"New trading day detected. Start-of-day equity: {self.start_of_day_equity:.2f}"
+                f"New trading day detected. Start-of-day equity: {self.start_of_day_equity:.2f}. "
+                "Kill-switch tracker reset."
             )
 
     def _can_trade(self) -> bool:
@@ -244,23 +250,45 @@ class ChaosEngineFX:
 
         # -----------------------------------------------------------------------
         # AGGRESSIVE MODE: Consecutive loss kill switch (3 losses)
+        # With a 30-minute cooldown so trading can resume within the same day.
         # -----------------------------------------------------------------------
-        if check_consecutive_loss_kill_switch(self.closed_trade_results):
-            logger.warning(
-                f"[AGGRESSIVE KILL SWITCH] {settings.KILL_SWITCH_CONSECUTIVE_LOSSES} "
-                "consecutive losses detected. Trading halted for this cycle."
-            )
-            summary = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "equity": equity,
-                "actions": [],
-                "reason": "kill_switch_consecutive_losses",
-                "surge_mode": False,
-                "portfolio_risk_pct": portfolio_risk * 100,
-                "currency_exposure": currency_exposure,
-            }
-            self._record_run(summary)
-            return summary
+        KILL_SWITCH_COOLDOWN_SECONDS = 1800  # 30 minutes
+        kill_switch_active = check_consecutive_loss_kill_switch(self.closed_trade_results)
+
+        if kill_switch_active:
+            now_utc = datetime.now(timezone.utc)
+            if self._kill_switch_triggered_at is None:
+                self._kill_switch_triggered_at = now_utc
+
+            elapsed = (now_utc - self._kill_switch_triggered_at).total_seconds()
+            if elapsed < KILL_SWITCH_COOLDOWN_SECONDS:
+                remaining = int(KILL_SWITCH_COOLDOWN_SECONDS - elapsed)
+                logger.warning(
+                    f"[AGGRESSIVE KILL SWITCH] {settings.KILL_SWITCH_CONSECUTIVE_LOSSES} "
+                    f"consecutive losses detected. Trading halted for {remaining}s more."
+                )
+                summary = {
+                    "timestamp": now_utc.isoformat(),
+                    "equity": equity,
+                    "actions": [],
+                    "reason": "kill_switch_consecutive_losses",
+                    "surge_mode": False,
+                    "portfolio_risk_pct": portfolio_risk * 100,
+                    "currency_exposure": currency_exposure,
+                }
+                self._record_run(summary)
+                return summary
+            else:
+                # Cooldown expired — clear tracker and resume trading
+                logger.info(
+                    "[AGGRESSIVE KILL SWITCH] Cooldown expired after "
+                    f"{KILL_SWITCH_COOLDOWN_SECONDS}s. Resetting tracker and resuming."
+                )
+                self.closed_trade_results.clear()
+                self._kill_switch_triggered_at = None
+        else:
+            # No consecutive losses — make sure the trigger timestamp is clear
+            self._kill_switch_triggered_at = None
 
         actions: List[Dict[str, Any]] = []
 
