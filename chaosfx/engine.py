@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from chaosfx.config import settings
 from chaosfx.oanda_client import OandaClient
 from chaosfx.strategy import generate_signal, Signal
+import social_signals
 from chaosfx.risk import (
     compute_position_size,
     daily_drawdown_exceeded,
@@ -437,6 +438,68 @@ class ChaosEngineFX:
                     continue
 
                 # ---------------------------------------------------------------
+                # Social Signal sentiment filter & confidence boost
+                # ---------------------------------------------------------------
+                social_data = social_signals.get_social_sentiment_for_pair(pair)
+                social_alignment = "none"
+                social_conf = 0.0
+
+                if social_data is not None:
+                    s_sentiment = social_data.get("sentiment", "").lower()
+                    social_conf = float(social_data.get("confidence", 0.0))
+                    s_mentions = social_data.get("mentions", 0)
+
+                    trade_is_long = signal.side == "LONG"
+                    if (trade_is_long and s_sentiment == "bullish") or (
+                        not trade_is_long and s_sentiment == "bearish"
+                    ):
+                        social_alignment = "aligned"
+                    elif (trade_is_long and s_sentiment == "bearish") or (
+                        not trade_is_long and s_sentiment == "bullish"
+                    ):
+                        social_alignment = "conflicting"
+                    else:
+                        social_alignment = "neutral"
+
+                    logger.info(
+                        f"[SOCIAL] {pair}: sentiment={s_sentiment} conf={social_conf:.2f} "
+                        f"mentions={s_mentions} alignment={social_alignment}"
+                    )
+
+                    # Block if social sentiment strongly conflicts
+                    if social_alignment == "conflicting" and social_conf >= 0.6:
+                        logger.info(
+                            f"[SOCIAL BLOCK] {signal.side} {pair} blocked "
+                            f"-- social strongly {s_sentiment} (conf={social_conf:.2f})"
+                        )
+                        continue
+
+                    # Boost confidence when sentiment aligns
+                    if social_alignment == "aligned" and social_conf >= 0.5:
+                        boost = social_conf * 0.5  # up to +0.5 confidence
+                        confidence += boost
+                        logger.info(
+                            f"[SOCIAL BOOST] {pair}: confidence boosted by {boost:.2f} "
+                            f"to {confidence:.2f} (social aligned)"
+                        )
+
+                    # Reduce confidence when sentiment mildly conflicts
+                    if social_alignment == "conflicting" and social_conf >= 0.4:
+                        penalty = social_conf * 0.3  # up to -0.3 confidence
+                        confidence -= penalty
+                        logger.info(
+                            f"[SOCIAL PENALTY] {pair}: confidence reduced by {penalty:.2f} "
+                            f"to {confidence:.2f} (social conflicting)"
+                        )
+                        # Re-check confidence minimum after penalty
+                        if confidence < settings.CONFIDENCE_MIN:
+                            logger.info(
+                                f"[SOCIAL REJECT] {pair}: confidence {confidence:.2f} "
+                                f"below minimum {settings.CONFIDENCE_MIN} after social penalty"
+                            )
+                            continue
+
+                # ---------------------------------------------------------------
                 # AGGRESSIVE MODE: Currency exposure check
                 # Block stacking of multiple USD-directional trades
                 # ---------------------------------------------------------------
@@ -518,6 +581,9 @@ class ChaosEngineFX:
                     "currency_exposure": compute_currency_exposure(
                         self.client.get_open_trades()
                     ),
+                    # Social signal data
+                    "social_alignment": social_alignment,
+                    "social_confidence": social_conf,
                 }
                 actions.append(action_info)
                 self._record_trade(action_info)
