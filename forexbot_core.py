@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import logging
+import os
 import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Dict, Set
 
+import social_signals
+
 logger = logging.getLogger("forexbot.liquidity")
+
+# Social signal configuration
+_SOCIAL_SENTIMENT_BLOCK_ENABLED = os.getenv("SOCIAL_SENTIMENT_BLOCK", "1").strip() == "1"
+_SOCIAL_SIZE_BOOST_PCT = float(os.getenv("SOCIAL_SIZE_BOOST_PCT", "25"))  # +25% when aligned
+_SOCIAL_SIZE_CUT_PCT = float(os.getenv("SOCIAL_SIZE_CUT_PCT", "30"))     # -30% when conflicting
 
 
 def _is_forex_market_open(now_utc: datetime) -> bool:
@@ -187,6 +195,60 @@ def run_tick(
     planned_out: List[Dict[str, Any]] = []
 
     for sig in signals:
+        # --- Social Signal sentiment check ---
+        social_data = social_signals.get_social_sentiment_for_pair(sig.symbol)
+        social_sentiment = None
+        social_confidence = 0.0
+        social_alignment = "none"  # "aligned", "conflicting", or "none"
+
+        if social_data is not None:
+            social_sentiment = social_data.get("sentiment", "").lower()
+            social_confidence = float(social_data.get("confidence", 0.0))
+            social_mentions = social_data.get("mentions", 0)
+
+            # Determine alignment between trade direction and social sentiment
+            trade_is_long = sig.side.lower() == "long"
+            sentiment_bullish = social_sentiment == "bullish"
+            sentiment_bearish = social_sentiment == "bearish"
+
+            if (trade_is_long and sentiment_bullish) or (not trade_is_long and sentiment_bearish):
+                social_alignment = "aligned"
+            elif (trade_is_long and sentiment_bearish) or (not trade_is_long and sentiment_bullish):
+                social_alignment = "conflicting"
+            else:
+                social_alignment = "neutral"
+
+            logger.info(
+                "LIQ SOCIAL: %s sentiment=%s confidence=%.2f mentions=%d alignment=%s",
+                sig.symbol, social_sentiment, social_confidence, social_mentions, social_alignment,
+            )
+
+            # Block trade if social sentiment strongly conflicts (confidence > 0.6)
+            if (
+                _SOCIAL_SENTIMENT_BLOCK_ENABLED
+                and social_alignment == "conflicting"
+                and social_confidence >= 0.6
+            ):
+                logger.info(
+                    "Liquidity: BLOCKED %s %s — social sentiment strongly %s (conf=%.2f)",
+                    sig.symbol, sig.side, social_sentiment, social_confidence,
+                )
+                signals_out.append(
+                    {
+                        "symbol": sig.symbol,
+                        "side": sig.side,
+                        "entry": float(sig.entry),
+                        "stop_loss": float(sig.stop_loss),
+                        "take_profit": float(sig.take_profit),
+                        "rr": float(sig.rr),
+                        "comment": sig.comment,
+                        "social_blocked": True,
+                        "social_sentiment": social_sentiment,
+                        "social_confidence": social_confidence,
+                    }
+                )
+                continue
+
         logger.info(
             "LIQ SIGNAL: %s %s entry=%.5f SL=%.5f TP=%.5f RR=%s | %s",
             sig.symbol, sig.side.upper(), sig.entry, sig.stop_loss,
@@ -202,6 +264,9 @@ def run_tick(
                 "take_profit": float(sig.take_profit),
                 "rr": float(sig.rr),
                 "comment": sig.comment,
+                "social_sentiment": social_sentiment,
+                "social_confidence": social_confidence,
+                "social_alignment": social_alignment,
             }
         )
 
@@ -220,6 +285,22 @@ def run_tick(
             stop_loss=sig.stop_loss,
             pip_value=pip_factor,
         )
+
+        # --- Social signal position size adjustment ---
+        if social_alignment == "aligned" and social_confidence >= 0.5:
+            boost = 1.0 + (_SOCIAL_SIZE_BOOST_PCT / 100.0)
+            size *= boost
+            logger.info(
+                "Liquidity: BOOSTED size for %s by %.0f%% (social aligned, conf=%.2f)",
+                sig.symbol, _SOCIAL_SIZE_BOOST_PCT, social_confidence,
+            )
+        elif social_alignment == "conflicting" and social_confidence >= 0.4:
+            cut = 1.0 - (_SOCIAL_SIZE_CUT_PCT / 100.0)
+            size *= cut
+            logger.info(
+                "Liquidity: REDUCED size for %s by %.0f%% (social conflicting, conf=%.2f)",
+                sig.symbol, _SOCIAL_SIZE_CUT_PCT, social_confidence,
+            )
 
         units = int(size)
         if units <= 0:
