@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import forexbot_core
 from chaosfx.engine import ChaosEngineFX
 from chaosfx.config import settings
+import social_signals
 
 logger = logging.getLogger("forexbot")
 logging.basicConfig(
@@ -66,6 +67,15 @@ async def _background_loop():
             )
         except Exception:
             logger.exception("ChaosFX tick failed")
+
+        # --- Social Signal Engine ---
+        try:
+            forex_signals = await social_signals.fetch_forex_signals()
+            logger.info(
+                "[SocialSignals] fetched %d forex signals", len(forex_signals)
+            )
+        except Exception:
+            logger.exception("Social signal fetch failed")
 
         await asyncio.sleep(SCHEDULER_INTERVAL)
 
@@ -698,6 +708,38 @@ async def liquidity_recent():
             lines.append(f"- {o.get('symbol')} {str(o.get('side')).upper()} units={o.get('units')} (sent)")
 
     return JSONResponse({"mode": mode, "text": "\n".join(lines)})
+
+
+# ----------------------------- Social Signals API --------------------------
+
+@app.get("/api/social-signals", response_class=JSONResponse)
+async def social_signals_endpoint():
+    """Fetch latest social signals from the centralized Signal Engine."""
+    forex = await social_signals.fetch_forex_signals()
+    last_fetch = social_signals.get_cached_last_fetch()
+    return JSONResponse({
+        "status": "ok",
+        "forex_signals": forex,
+        "count": len(forex),
+        "last_fetch": last_fetch.isoformat() if last_fetch else None,
+        "source": social_signals.SIGNAL_ENGINE_URL,
+    })
+
+
+@app.get("/api/social-signals/{pair}", response_class=JSONResponse)
+async def social_signal_for_pair(pair: str):
+    """Get social sentiment for a specific forex pair (e.g. EURUSD or EUR_USD)."""
+    # Ensure we have fresh data
+    if not social_signals.get_cached_forex_signals():
+        await social_signals.fetch_forex_signals()
+
+    signal = social_signals.get_social_sentiment_for_pair(pair)
+    if signal is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "not_found", "pair": pair, "message": "No social signal data for this pair"},
+        )
+    return JSONResponse({"status": "ok", "signal": signal})
 
 
 # ----------------------------- ChaosFX API --------------------------------
