@@ -275,6 +275,72 @@ class OandaBroker(BrokerClient):
 
         return Quote(bid=bid, ask=ask)
 
+    # --------- Open trades / positions (FIFO helpers) ----------
+
+    def get_open_trades(self, instrument: str) -> List[Dict[str, Any]]:
+        """
+        Return open trades for *instrument* sorted oldest-first (FIFO order).
+
+        Each element has at least: id, instrument, currentUnits, openTime.
+        """
+        url = f"{self.base_url}/accounts/{self.account_id}/trades"
+        params = {"instrument": instrument, "state": "OPEN"}
+        try:
+            resp = self.session.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            trades = resp.json().get("trades", [])
+            # Oldest first so we close in FIFO order
+            trades.sort(key=lambda t: t.get("openTime", ""))
+            return trades
+        except Exception as e:
+            logger.warning("get_open_trades(%s) failed: %s", instrument, e)
+            return []
+
+    def close_trade(self, trade_id: str) -> Dict[str, Any]:
+        """
+        Close a single trade by its OANDA trade id (FIFO: always close oldest first).
+        """
+        url = f"{self.base_url}/accounts/{self.account_id}/trades/{trade_id}/close"
+        try:
+            resp = self.session.put(url, json={}, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            logger.info("Closed trade %s: %s", trade_id, data)
+            return {"status": "ok", "trade_id": trade_id, "raw": data}
+        except Exception as e:
+            logger.error("Failed to close trade %s: %s", trade_id, e)
+            return {"status": "error", "trade_id": trade_id, "detail": str(e)}
+
+    def _close_opposing_trades(self, instrument: str, side: str) -> List[Dict[str, Any]]:
+        """
+        FIFO compliance: before opening a new position, close any existing
+        trades on the same instrument that are in the *opposite* direction.
+
+        Closes oldest first (FIFO order).
+        Returns list of close results.
+        """
+        open_trades = self.get_open_trades(instrument)
+        if not open_trades:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for trade in open_trades:
+            current_units = int(trade.get("currentUnits", 0))
+            trade_id = trade.get("id", "")
+            # currentUnits > 0 means long, < 0 means short
+            trade_is_long = current_units > 0
+            new_is_long = side.lower() != "short"
+
+            if trade_is_long != new_is_long:
+                logger.info(
+                    "FIFO: closing opposing trade %s (%s units) on %s before opening %s",
+                    trade_id, current_units, instrument, side.upper(),
+                )
+                result = self.close_trade(trade_id)
+                results.append(result)
+
+        return results
+
     # --------- Orders (market + SL/TP) ----------
 
     def place_order(
@@ -289,10 +355,24 @@ class OandaBroker(BrokerClient):
         """
         Send a MARKET order to OANDA with SL & TP.
 
+        FIFO compliance:
+        - Closes any opposing trades on the same instrument (oldest first)
+          before submitting the new order.
+        - Uses positionFill=REDUCE_FIRST so OANDA reduces an existing
+          opposite position rather than rejecting the order.
+
         - units: positive magnitude (we set sign from side)
         - side: 'long' or 'short'
         """
         instrument = self._instrument(symbol)
+
+        # --- FIFO: close opposing trades first ---
+        closed = self._close_opposing_trades(instrument, side)
+        if closed:
+            logger.info(
+                "FIFO: closed %d opposing trade(s) on %s before new %s order",
+                len(closed), instrument, side.upper(),
+            )
 
         u = abs(int(units))
         if side.lower() == "short":
@@ -304,7 +384,7 @@ class OandaBroker(BrokerClient):
                 "instrument": instrument,
                 "timeInForce": "FOK",
                 "type": "MARKET",
-                "positionFill": "DEFAULT",
+                "positionFill": "REDUCE_FIRST",
             }
         }
 
@@ -325,7 +405,7 @@ class OandaBroker(BrokerClient):
                 "ORDER REJECTED (%s) %s %s units=%d reason=%s",
                 self.env, symbol, side.upper(), u, reason,
             )
-            return {"status": "rejected", "reason": reason, "raw": data}
+            return {"status": "rejected", "reason": reason, "raw": data, "closed_trades": closed}
 
         logger.info(
             "ORDER FILLED (%s) %s %s units=%d SL=%s TP=%s",
@@ -333,7 +413,7 @@ class OandaBroker(BrokerClient):
             f"{stop_loss:.5f}" if stop_loss is not None else "none",
             f"{take_profit:.5f}" if take_profit is not None else "none",
         )
-        return {"status": "ok", "raw": data}
+        return {"status": "ok", "raw": data, "closed_trades": closed}
 
 
 def get_liquidity_broker() -> OandaBroker:
@@ -450,6 +530,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     a { color: #a5b4fc; text-decoration:none; }
     a:hover { text-decoration: underline; }
     pre { margin: 0; white-space: pre-wrap; color: #d1d5db; font-size: 0.85rem; }
+    .full-width { grid-column: 1 / -1; }
+    .social-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+    .signal-card {
+      background: rgba(10,18,36,0.85);
+      border: 1px solid rgba(148,163,184,0.18);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .signal-pair { font-size: 1.1rem; font-weight: 700; color: #f9fafb; margin: 0 0 8px; }
+    .sentiment-badge {
+      display: inline-block; font-size: 0.75rem; padding: 3px 10px;
+      border-radius: 999px; font-weight: 600; text-transform: uppercase;
+    }
+    .sentiment-bullish { background: rgba(34,197,94,0.18); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
+    .sentiment-bearish { background: rgba(239,68,68,0.18); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+    .sentiment-neutral { background: rgba(156,163,175,0.18); color: #9ca3af; border: 1px solid rgba(156,163,175,0.4); }
+    .signal-stat { display: flex; justify-content: space-between; margin: 6px 0; font-size: 0.85rem; color: #9ca3af; }
+    .signal-stat span:last-child { color: #e5e7eb; font-weight: 500; }
+    .conf-bar { height: 6px; border-radius: 999px; background: rgba(148,163,184,0.15); margin-top: 4px; overflow: hidden; }
+    .conf-fill { height: 100%; border-radius: 999px; transition: width 0.4s ease; }
+    .conf-high { background: linear-gradient(90deg, #22c55e, #4ade80); }
+    .conf-med { background: linear-gradient(90deg, #eab308, #facc15); }
+    .conf-low { background: linear-gradient(90deg, #6b7280, #9ca3af); }
+    .signal-strategies { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+    .strat-tag {
+      font-size: 0.7rem; padding: 2px 8px; border-radius: 999px;
+      background: rgba(139,92,246,0.15); color: #c4b5fd;
+      border: 1px solid rgba(139,92,246,0.3);
+    }
+    .trade-influence {
+      margin-top: 10px; padding: 8px 12px; border-radius: 10px;
+      font-size: 0.8rem;
+      background: rgba(79,70,229,0.1); border: 1px solid rgba(79,70,229,0.25);
+      color: #a5b4fc;
+    }
+    .influence-aligned { background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.25); color: #86efac; }
+    .influence-conflicting { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.25); color: #fca5a5; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -504,6 +621,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Social Signals Card (full width below the grid) -->
+    <div class="card" style="margin-top: 18px;">
+      <h2 class="title">Social Signals Intelligence</h2>
+      <p class="desc">
+        Live sentiment from social sources — influences position sizing and can block trades when strongly conflicting.
+      </p>
+      <div class="row">
+        <span class="pill" id="ss-source">Source: loading…</span>
+        <span class="pill" id="ss-count">Signals: …</span>
+        <span class="pill" id="ss-updated">Updated: …</span>
+      </div>
+
+      <div class="label">CONTROLS</div>
+      <button id="ss-btn">Refresh Social Signals</button>
+      <div id="ss-status" class="status"></div>
+
+      <div class="label">PAIR SENTIMENT & TRADE INFLUENCE</div>
+      <div class="hr"></div>
+      <div id="ss-grid" class="social-grid">
+        <div style="color:#6b7280;">Loading social signals…</div>
+      </div>
+
+      <div class="label" style="margin-top:16px;">HOW SIGNALS AFFECT DECISIONS</div>
+      <div class="hr"></div>
+      <div style="font-size:0.85rem; color:#9ca3af; line-height:1.6;">
+        <strong style="color:#e5e7eb;">Position Boost:</strong> When social sentiment <em>aligns</em> with trade direction (confidence &ge; 50%), size is increased by up to 25%.<br/>
+        <strong style="color:#e5e7eb;">Position Cut:</strong> When sentiment <em>conflicts</em> (confidence &ge; 40%), size is reduced by up to 30%.<br/>
+        <strong style="color:#e5e7eb;">Trade Block:</strong> If sentiment <em>strongly conflicts</em> (confidence &ge; 60%), the trade is blocked entirely.
+      </div>
+    </div>
+
     <script>
       const liqBtn = document.getElementById("liq-btn");
       const liqStatus = document.getElementById("liq-status");
@@ -514,6 +662,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const cxStatus = document.getElementById("cx-status");
       const cxSummary = document.getElementById("cx-summary");
       const cxTrades = document.getElementById("cx-trades");
+
+      const ssBtn = document.getElementById("ss-btn");
+      const ssStatus = document.getElementById("ss-status");
+      const ssGrid = document.getElementById("ss-grid");
+      const ssSource = document.getElementById("ss-source");
+      const ssCount = document.getElementById("ss-count");
+      const ssUpdated = document.getElementById("ss-updated");
+
+      function renderSocialSignals(data) {
+        const signals = data.forex_signals || [];
+        ssSource.textContent = `Source: ${data.source || "unknown"}`;
+        ssCount.textContent = `Signals: ${data.count || 0}`;
+        ssUpdated.textContent = data.last_fetch
+          ? `Updated: ${new Date(data.last_fetch).toLocaleTimeString()}`
+          : "Updated: never";
+
+        if (!signals.length) {
+          ssGrid.innerHTML = '<div style="color:#6b7280;">No social signals available yet. The engine fetches data every tick cycle.</div>';
+          return;
+        }
+
+        ssGrid.innerHTML = signals.map(sig => {
+          const pair = sig.pair || "???";
+          const sentiment = (sig.sentiment || "neutral").toLowerCase();
+          const confidence = parseFloat(sig.confidence || 0);
+          const mentions = sig.mentions || 0;
+          const strategies = sig.strategies || [];
+          const sources = sig.sources || [];
+
+          const sentClass = sentiment === "bullish" ? "sentiment-bullish"
+            : sentiment === "bearish" ? "sentiment-bearish" : "sentiment-neutral";
+
+          const confPct = Math.round(confidence * 100);
+          const confClass = confidence >= 0.6 ? "conf-high" : confidence >= 0.4 ? "conf-med" : "conf-low";
+
+          // Determine trade influence text
+          let influenceHTML = "";
+          if (confidence >= 0.6) {
+            if (sentiment === "bullish") {
+              influenceHTML = `<div class="trade-influence influence-aligned">Strongly bullish — would BOOST long sizes +25% or BLOCK shorts</div>`;
+            } else if (sentiment === "bearish") {
+              influenceHTML = `<div class="trade-influence influence-conflicting">Strongly bearish — would BOOST short sizes +25% or BLOCK longs</div>`;
+            }
+          } else if (confidence >= 0.4) {
+            if (sentiment === "bullish") {
+              influenceHTML = `<div class="trade-influence">Moderately bullish — would CUT short sizes by 30%</div>`;
+            } else if (sentiment === "bearish") {
+              influenceHTML = `<div class="trade-influence">Moderately bearish — would CUT long sizes by 30%</div>`;
+            }
+          }
+
+          const stratTags = strategies.map(s => `<span class="strat-tag">${s}</span>`).join("");
+          const sourceList = sources.length ? `<div class="signal-stat"><span>Sources</span><span>${sources.join(", ")}</span></div>` : "";
+
+          return `
+            <div class="signal-card">
+              <div class="signal-pair">${pair} <span class="sentiment-badge ${sentClass}">${sentiment}</span></div>
+              <div class="signal-stat"><span>Confidence</span><span>${confPct}%</span></div>
+              <div class="conf-bar"><div class="conf-fill ${confClass}" style="width:${confPct}%"></div></div>
+              <div class="signal-stat"><span>Mentions</span><span>${mentions}</span></div>
+              ${sourceList}
+              ${strategies.length ? `<div class="signal-strategies">${stratTags}</div>` : ""}
+              ${influenceHTML}
+            </div>
+          `;
+        }).join("");
+      }
+
+      async function refreshSocial() {
+        try {
+          const ss = await fetch("/api/social-signals").then(r => r.json());
+          renderSocialSignals(ss);
+        } catch(e) {
+          // ignore
+        }
+      }
 
       async function refresh() {
         try {
@@ -527,6 +751,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } catch(e) {
           // ignore
         }
+        await refreshSocial();
       }
 
       liqBtn.addEventListener("click", async () => {
@@ -556,6 +781,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } finally {
           cxBtn.disabled = false;
           refresh();
+        }
+      });
+
+      ssBtn.addEventListener("click", async () => {
+        ssStatus.textContent = "Fetching social signals…";
+        ssBtn.disabled = true;
+        try {
+          const res = await fetch("/api/social-signals").then(r => r.json());
+          renderSocialSignals(res);
+          ssStatus.textContent = `Fetched ${res.count || 0} signals.`;
+        } catch(e) {
+          ssStatus.textContent = "Error fetching signals. Check logs.";
+        } finally {
+          ssBtn.disabled = false;
         }
       });
 
