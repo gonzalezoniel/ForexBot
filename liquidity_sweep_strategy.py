@@ -43,6 +43,7 @@ class LiquiditySweepConfig:
     rr_default: float
     rr_premium: float
     asian_session: tuple[time, time]  # reserved if you want to use it later
+    min_sl_pips: float = 8.0   # minimum SL distance in pips to avoid noise/spread stops
 
 
 # --- Pair-specific configuration -------------------------------------------
@@ -57,6 +58,7 @@ PAIR_CONFIG: Dict[Symbol, LiquiditySweepConfig] = {
         rr_default=2.0,        # was 3.0 – more realistic reaction target
         rr_premium=2.5,        # was 3.0
         asian_session=(time(0, 0), time(7, 0)),
+        min_sl_pips=8.0,       # minimum 8 pips SL for EURGBP
     ),
     "XAUUSD": LiquiditySweepConfig(
         max_spread=35.0,
@@ -64,6 +66,7 @@ PAIR_CONFIG: Dict[Symbol, LiquiditySweepConfig] = {
         rr_default=2.5,        # was 4.0
         rr_premium=3.0,        # was 5.0
         asian_session=(time(0, 0), time(7, 0)),
+        min_sl_pips=80.0,      # minimum 80 points SL for XAUUSD
     ),
     "GBPCAD": LiquiditySweepConfig(
         max_spread=4.0,
@@ -71,6 +74,7 @@ PAIR_CONFIG: Dict[Symbol, LiquiditySweepConfig] = {
         rr_default=2.0,        # was 3.0
         rr_premium=2.5,        # was 4.0
         asian_session=(time(0, 0), time(7, 0)),
+        min_sl_pips=8.0,       # minimum 8 pips SL for GBPCAD
     ),
 }
 
@@ -347,15 +351,34 @@ def _calc_sl_tp(
     sweep: SweepResult,
     rr: float,
     buffer_points: float = 0.0,
-) -> tuple[float, float]:
-    """SL beyond sweep wick, TP based on RR."""
+    min_sl_distance: float = 0.0,
+) -> Optional[tuple[float, float]]:
+    """SL beyond sweep wick, TP based on RR.
+
+    Returns None if the SL/TP would be invalid (e.g. entry too close to
+    sweep wick, SL on wrong side, or distance below minimum).
+    """
     if side == "long":
         sl = sweep.candle.low - buffer_points
         risk = entry - sl
+        # If entry dropped below SL level, signal is invalid
+        if risk <= 0:
+            return None
+        # Enforce minimum SL distance
+        if min_sl_distance > 0 and risk < min_sl_distance:
+            sl = entry - min_sl_distance
+            risk = min_sl_distance
         tp = entry + risk * rr
     else:
         sl = sweep.candle.high + buffer_points
         risk = sl - entry
+        # If entry rose above SL level, signal is invalid
+        if risk <= 0:
+            return None
+        # Enforce minimum SL distance
+        if min_sl_distance > 0 and risk < min_sl_distance:
+            sl = entry + min_sl_distance
+            risk = min_sl_distance
         tp = entry - risk * rr
     return sl, tp
 
@@ -434,11 +457,27 @@ def generate_signals(market: MarketDataInterface, now_utc: datetime) -> List[Sig
         last = candles_5m[-1]
         entry = last.close
         rr = _choose_rr(symbol, sweep)
-        # Add a small buffer beyond the sweep wick so SL isn't right at the
+        # Add a buffer beyond the sweep wick so SL isn't right at the
         # liquidity level.  For XAU use a wider buffer (price is ~2000).
         pip_f = PIP_FACTOR.get(symbol, 0.0001)
-        buffer = 3.0 * pip_f  # 3 pips / 3 points buffer
-        sl, tp = _calc_sl_tp(entry, sweep.side, sweep, rr, buffer_points=buffer)
+        buffer = 5.0 * pip_f  # 5 pips / 5 points buffer (was 3)
+        min_sl_distance = cfg.min_sl_pips * pip_f
+        sl_tp = _calc_sl_tp(
+            entry, sweep.side, sweep, rr,
+            buffer_points=buffer,
+            min_sl_distance=min_sl_distance,
+        )
+
+        # Skip if SL/TP calculation failed (entry too close to sweep wick)
+        if sl_tp is None:
+            continue
+        sl, tp = sl_tp
+
+        # Final validation: SL distance must be > 2x raw spread to avoid
+        # being stopped out by spread fluctuations alone
+        sl_distance = abs(entry - sl)
+        if sl_distance < 2.0 * raw_spread:
+            continue
 
         sig = Signal(
             symbol=symbol,
