@@ -343,6 +343,23 @@ def run_tick(
         }
         planned_out.append(plan_payload)
 
+        # --- FIFO: check for existing open trades on this instrument ---
+        # Both Liquidity and ChaosFX share the same OANDA account.
+        # Skip if there's already an open trade on this instrument to avoid
+        # duplicate positions that trigger FIFO errors.
+        if execute_trades and hasattr(broker_client, "get_open_trades"):
+            try:
+                instrument = broker_client._instrument(sig.symbol)
+                existing = broker_client.get_open_trades(instrument)
+                if existing:
+                    logger.info(
+                        "Liquidity: %s already has %d open trade(s), skipping to avoid FIFO conflict.",
+                        sig.symbol, len(existing),
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("Liquidity: open-trade check failed for %s: %s", sig.symbol, e)
+
         order_resp: Any = None
         if execute_trades:
             try:

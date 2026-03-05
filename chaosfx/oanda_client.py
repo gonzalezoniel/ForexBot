@@ -57,6 +57,61 @@ class OandaClient:
         resp.raise_for_status()
         return resp.json().get("candles", [])
 
+    def get_open_trades_for_instrument(self, instrument: str) -> List[Dict[str, Any]]:
+        """Return open trades for a specific instrument, sorted oldest-first (FIFO order)."""
+        resp = self._client.get(
+            f"/accounts/{self.account_id}/trades",
+            params={"instrument": instrument, "state": "OPEN"},
+        )
+        resp.raise_for_status()
+        trades = resp.json().get("trades", [])
+        trades.sort(key=lambda t: t.get("openTime", ""))
+        return trades
+
+    def _close_conflicting_trades(self, instrument: str, units: int) -> List[Dict[str, Any]]:
+        """
+        FIFO compliance: before opening a new position, close any existing
+        trades on the same instrument that are in the *opposite* direction.
+
+        Also returns info about same-direction trades so the caller can
+        decide whether to skip the new order (avoid duplicates).
+        """
+        open_trades = self.get_open_trades_for_instrument(instrument)
+        if not open_trades:
+            return []
+
+        new_is_long = units > 0
+        results: List[Dict[str, Any]] = []
+        for trade in open_trades:
+            current_units = int(trade.get("currentUnits", 0))
+            trade_id = trade.get("id", "")
+            trade_is_long = current_units > 0
+
+            if trade_is_long != new_is_long:
+                logger.info(
+                    "FIFO: closing opposing trade %s (%s units) on %s before new order",
+                    trade_id, current_units, instrument,
+                )
+                try:
+                    close_resp = self.close_trade(trade_id)
+                    results.append({"status": "closed", "trade_id": trade_id, "raw": close_resp})
+                except Exception as e:
+                    logger.error("FIFO: failed to close trade %s: %s", trade_id, e)
+                    results.append({"status": "error", "trade_id": trade_id, "detail": str(e)})
+
+        return results
+
+    def has_open_trade_same_direction(self, instrument: str, units: int) -> bool:
+        """Check if there is already an open trade in the same direction on this instrument."""
+        open_trades = self.get_open_trades_for_instrument(instrument)
+        new_is_long = units > 0
+        for trade in open_trades:
+            current_units = int(trade.get("currentUnits", 0))
+            trade_is_long = current_units > 0
+            if trade_is_long == new_is_long:
+                return True
+        return False
+
     def create_market_order(
         self,
         instrument: str,
@@ -66,14 +121,37 @@ class OandaClient:
     ) -> Dict[str, Any]:
         """
         units > 0: buy, units < 0: sell
+
+        FIFO compliance:
+        - Checks for existing same-direction trades and skips if one exists
+          (prevents duplicate positions with conflicting SL/TP).
+        - Closes any opposing trades on the same instrument (oldest first)
+          before submitting the new order.
+        - Uses positionFill=REDUCE_FIRST for FIFO safety.
         """
+        # --- FIFO: skip if same-direction trade already exists ---
+        if self.has_open_trade_same_direction(instrument, units):
+            logger.info(
+                "FIFO: skipping %s units=%d — same-direction trade already open",
+                instrument, units,
+            )
+            return {"status": "skipped", "reason": "same_direction_trade_exists"}
+
+        # --- FIFO: close opposing trades first ---
+        closed = self._close_conflicting_trades(instrument, units)
+        if closed:
+            logger.info(
+                "FIFO: closed %d opposing trade(s) on %s before new order",
+                len(closed), instrument,
+            )
+
         order: Dict[str, Any] = {
             "order": {
                 "units": str(units),
                 "instrument": instrument,
                 "timeInForce": "FOK",
                 "type": "MARKET",
-                "positionFill": "DEFAULT",
+                "positionFill": "REDUCE_FIRST",
             }
         }
 
@@ -91,9 +169,10 @@ class OandaClient:
             logger.error(
                 "ORDER REJECTED %s units=%d reason=%s", instrument, units, reason,
             )
-            return {"status": "rejected", "reason": reason, "raw": data}
+            return {"status": "rejected", "reason": reason, "raw": data, "closed_trades": closed}
 
         logger.info("ORDER FILLED %s units=%d", instrument, units)
+        data["closed_trades"] = closed
         return data
 
     def close_trade(self, trade_id: str) -> Dict[str, Any]:

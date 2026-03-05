@@ -311,6 +311,20 @@ class OandaBroker(BrokerClient):
             logger.error("Failed to close trade %s: %s", trade_id, e)
             return {"status": "error", "trade_id": trade_id, "detail": str(e)}
 
+    def has_same_direction_trade(self, instrument: str, side: str) -> bool:
+        """
+        FIFO: check if there's already an open trade in the same direction.
+        Returns True if a duplicate same-direction position exists.
+        """
+        open_trades = self.get_open_trades(instrument)
+        new_is_long = side.lower() != "short"
+        for trade in open_trades:
+            current_units = int(trade.get("currentUnits", 0))
+            trade_is_long = current_units > 0
+            if trade_is_long == new_is_long:
+                return True
+        return False
+
     def _close_opposing_trades(self, instrument: str, side: str) -> List[Dict[str, Any]]:
         """
         FIFO compliance: before opening a new position, close any existing
@@ -365,6 +379,14 @@ class OandaBroker(BrokerClient):
         - side: 'long' or 'short'
         """
         instrument = self._instrument(symbol)
+
+        # --- FIFO: skip if same-direction trade already exists ---
+        if self.has_same_direction_trade(instrument, side):
+            logger.info(
+                "FIFO: skipping %s %s — same-direction trade already open on %s",
+                symbol, side.upper(), instrument,
+            )
+            return {"status": "skipped", "reason": "same_direction_trade_exists", "closed_trades": []}
 
         # --- FIFO: close opposing trades first ---
         closed = self._close_opposing_trades(instrument, side)
@@ -670,6 +692,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const ssCount = document.getElementById("ss-count");
       const ssUpdated = document.getElementById("ss-updated");
 
+      function esc(str) {
+        const d = document.createElement("div");
+        d.textContent = String(str);
+        return d.innerHTML;
+      }
+
       function renderSocialSignals(data) {
         const signals = data.forex_signals || [];
         ssSource.textContent = `Source: ${data.source || "unknown"}`;
@@ -684,12 +712,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
 
         ssGrid.innerHTML = signals.map(sig => {
-          const pair = sig.pair || "???";
-          const sentiment = (sig.sentiment || "neutral").toLowerCase();
+          const pair = esc(sig.pair || "???");
+          const sentiment = esc((sig.sentiment || "neutral").toLowerCase());
           const confidence = parseFloat(sig.confidence || 0);
-          const mentions = sig.mentions || 0;
-          const strategies = sig.strategies || [];
-          const sources = sig.sources || [];
+          const mentions = parseInt(sig.mentions || 0, 10);
+          const strategies = (sig.strategies || []).map(s => esc(s));
+          const sources = (sig.sources || []).map(s => esc(s));
 
           const sentClass = sentiment === "bullish" ? "sentiment-bullish"
             : sentiment === "bearish" ? "sentiment-bearish" : "sentiment-neutral";
