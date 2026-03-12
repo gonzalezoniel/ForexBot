@@ -473,7 +473,7 @@ def generate_signals(market: MarketDataInterface, now_utc: datetime) -> List[Sig
             continue
         sl, tp = sl_tp
 
-        # Final validation: SL distance must be > 2x raw spread to avoid
+        # Final validation: SL distance must be > 3x raw spread to avoid
         # being stopped out by spread fluctuations alone
         sl_distance = abs(entry - sl)
         if sl_distance < 3.0 * raw_spread:
