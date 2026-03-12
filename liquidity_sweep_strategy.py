@@ -54,25 +54,25 @@ class LiquiditySweepConfig:
 PAIR_CONFIG: Dict[Symbol, LiquiditySweepConfig] = {
     "EURGBP": LiquiditySweepConfig(
         max_spread=2.5,
-        min_wick_ratio=0.35,   # was 0.40 – easier to qualify a sweep
-        rr_default=2.0,        # was 3.0 – more realistic reaction target
-        rr_premium=2.5,        # was 3.0
+        min_wick_ratio=0.40,   # tightened back to filter false sweeps
+        rr_default=2.5,        # raised from 2.0 for better reward
+        rr_premium=3.0,        # raised from 2.5
         asian_session=(time(0, 0), time(7, 0)),
         min_sl_pips=8.0,       # minimum 8 pips SL for EURGBP
     ),
     "XAUUSD": LiquiditySweepConfig(
         max_spread=35.0,
-        min_wick_ratio=0.30,   # was 0.35 – XAU often wicks aggressively
-        rr_default=2.5,        # was 4.0
-        rr_premium=3.0,        # was 5.0
+        min_wick_ratio=0.35,   # tightened back to filter false sweeps
+        rr_default=3.5,        # raised from 2.5 — XAU needs wider targets
+        rr_premium=4.0,        # raised from 3.0
         asian_session=(time(0, 0), time(7, 0)),
         min_sl_pips=80.0,      # minimum 80 points SL for XAUUSD
     ),
     "GBPCAD": LiquiditySweepConfig(
         max_spread=4.0,
-        min_wick_ratio=0.35,   # was 0.40
-        rr_default=2.0,        # was 3.0
-        rr_premium=2.5,        # was 4.0
+        min_wick_ratio=0.40,   # tightened back to filter false sweeps
+        rr_default=2.5,        # raised from 2.0 for better reward
+        rr_premium=3.0,        # raised from 2.5
         asian_session=(time(0, 0), time(7, 0)),
         min_sl_pips=8.0,       # minimum 8 pips SL for GBPCAD
     ),
@@ -190,7 +190,7 @@ def _previous_day_high_low(candles_5m: List[Candle]) -> Optional[tuple[float, fl
 
 def _equal_levels(
     candles_5m: List[Candle],
-    threshold_ratio: float = 0.20,  # was 0.15 – slightly looser clustering
+    threshold_ratio: float = 0.15,  # tightened back to reduce false levels
 ) -> List[LiquidityLevel]:
     """Find very rough equal highs/lows using an ATR-ish tolerance."""
     if len(candles_5m) < 10:
@@ -248,7 +248,7 @@ def _detect_sweep(
     levels: List[LiquidityLevel],
     bias: str,
     cfg: LiquiditySweepConfig,
-    scan_window: int = 10,
+    scan_window: int = 6,
 ) -> Optional[SweepResult]:
     """
     Scan the last ``scan_window`` candles (not just the very last one) for a
@@ -314,22 +314,22 @@ def _confirm_bos(
         return False
 
     # look back a few bars before sweep to define a minor structure level
-    lookback = candles_5m[max(0, idx - 3) : idx]  # was 5
+    lookback = candles_5m[max(0, idx - 5) : idx]  # increased back to 5 for stronger BOS
 
     if sweep.side == "long":
         if not lookback:
             return False
         minor_high = max(c.high for c in lookback)
         for c in candles_5m[idx + 1 :]:
-            # allow wick break, not just close break
-            if c.high > minor_high:
+            # require close-based break for stronger confirmation
+            if c.close > minor_high:
                 return True
     else:  # short
         if not lookback:
             return False
         minor_low = min(c.low for c in lookback)
         for c in candles_5m[idx + 1 :]:
-            if c.low < minor_low:
+            if c.close < minor_low:
                 return True
 
     return False
@@ -476,7 +476,7 @@ def generate_signals(market: MarketDataInterface, now_utc: datetime) -> List[Sig
         # Final validation: SL distance must be > 2x raw spread to avoid
         # being stopped out by spread fluctuations alone
         sl_distance = abs(entry - sl)
-        if sl_distance < 2.0 * raw_spread:
+        if sl_distance < 3.0 * raw_spread:
             continue
 
         sig = Signal(

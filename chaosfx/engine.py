@@ -253,7 +253,7 @@ class ChaosEngineFX:
         # AGGRESSIVE MODE: Consecutive loss kill switch (3 losses)
         # With a 30-minute cooldown so trading can resume within the same day.
         # -----------------------------------------------------------------------
-        KILL_SWITCH_COOLDOWN_SECONDS = 1800  # 30 minutes
+        KILL_SWITCH_COOLDOWN_SECONDS = 7200  # 2 hours (increased from 30 min)
         kill_switch_active = check_consecutive_loss_kill_switch(self.closed_trade_results)
 
         if kill_switch_active:
@@ -317,7 +317,7 @@ class ChaosEngineFX:
         analyses: List[Dict[str, Any]] = []
         for pair in settings.FOREX_PAIRS[: settings.MAX_PAIRS]:
             try:
-                candles = self.client.get_candles(pair, granularity="M1", count=200)
+                candles = self.client.get_candles(pair, granularity="M5", count=200)
                 signal, df, meta = generate_signal(
                     instrument=pair,
                     candles=candles,
