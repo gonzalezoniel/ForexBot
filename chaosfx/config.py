@@ -43,14 +43,14 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
     # Risk management (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
-    RISK_PER_TRADE: float = 0.02          # 2% of equity per trade (was 1%)
-    MAX_DRAWDOWN_PER_DAY: float = 0.06    # 6% daily drawdown kill switch (was 3%)
+    RISK_PER_TRADE: float = 0.01          # 1% of equity per trade (reduced from 2% to limit losses)
+    MAX_DRAWDOWN_PER_DAY: float = 0.03    # 3% daily drawdown kill switch (tightened from 6%)
     MAX_OPEN_TRADES: int = 2              # 2 default (3 max only if total risk <= 4%)
-    MAX_OPEN_TRADES_EXTENDED: int = 3     # allowed only when portfolio risk <= MAX_TOTAL_PORTFOLIO_RISK
+    MAX_OPEN_TRADES_EXTENDED: int = 2     # no extended slots — max 2 concurrent trades always
     MAX_TOTAL_PORTFOLIO_RISK: float = 0.04  # 4% max total portfolio risk
 
     # Kill switch: consecutive losses
-    KILL_SWITCH_CONSECUTIVE_LOSSES: int = 3  # stop after 3 consecutive losses
+    KILL_SWITCH_CONSECUTIVE_LOSSES: int = 2  # stop after 2 consecutive losses (tightened from 3)
 
     # -----------------------------------------------------------------------
     # Reward structure (AGGRESSIVE MODE)
@@ -62,20 +62,20 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------
     # Volatility & selection (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
-    VOLATILITY_MIN_SCORE: float = 0.0003    # ATR/price threshold (rough)
-    VOLATILITY_TOP_K: int = 2               # trade only top 2 (was 4)
+    VOLATILITY_MIN_SCORE: float = 0.0005    # ATR/price threshold (raised to filter low-vol chop)
+    VOLATILITY_TOP_K: int = 1               # trade only the single best signal
 
     # Volatility surge mode
     VOLATILITY_EXTREME_MULTIPLIER: float = 1.8
     EXTREME_RISK_FACTOR: float = 0.5
 
     # ATR expansion filter: current ATR must be > this multiplier * rolling mean ATR
-    ATR_EXPANSION_MULTIPLIER: float = 1.15  # ATR expanding (was implicit 1.1)
+    ATR_EXPANSION_MULTIPLIER: float = 1.3   # ATR must expand 30% above mean (tightened from 15%)
 
     # -----------------------------------------------------------------------
     # Confidence scoring (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
-    CONFIDENCE_MIN: float = 1.5
+    CONFIDENCE_MIN: float = 2.0             # raised to require stronger confluence
 
     # -----------------------------------------------------------------------
     # Currency exposure control (AGGRESSIVE MODE)

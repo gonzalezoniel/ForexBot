@@ -51,7 +51,7 @@ from liquidity_sweep_strategy import (
     Symbol,
 )
 
-SYMBOL_COOLDOWN_SECONDS = 300
+SYMBOL_COOLDOWN_SECONDS = 600  # 10 min cooldown (increased from 5 min to reduce overtrading)
 _last_order_time: Dict[str, float] = {}
 
 
