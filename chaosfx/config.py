@@ -44,13 +44,13 @@ class Settings(BaseSettings):
     # Risk management (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
     RISK_PER_TRADE: float = 0.01          # 1% of equity per trade (reduced from 2% to limit losses)
-    MAX_DRAWDOWN_PER_DAY: float = 0.03    # 3% daily drawdown kill switch (tightened from 6%)
-    MAX_OPEN_TRADES: int = 2              # 2 default (3 max only if total risk <= 4%)
-    MAX_OPEN_TRADES_EXTENDED: int = 2     # no extended slots — max 2 concurrent trades always
+    MAX_DRAWDOWN_PER_DAY: float = 0.05    # 5% daily drawdown kill switch
+    MAX_OPEN_TRADES: int = 3              # 3 default (4 max only if total risk <= 4%)
+    MAX_OPEN_TRADES_EXTENDED: int = 3     # extended slots when total risk is low
     MAX_TOTAL_PORTFOLIO_RISK: float = 0.04  # 4% max total portfolio risk
 
     # Kill switch: consecutive losses
-    KILL_SWITCH_CONSECUTIVE_LOSSES: int = 2  # stop after 2 consecutive losses (tightened from 3)
+    KILL_SWITCH_CONSECUTIVE_LOSSES: int = 3  # stop after 3 consecutive losses
 
     # -----------------------------------------------------------------------
     # Reward structure (AGGRESSIVE MODE)
@@ -70,18 +70,18 @@ class Settings(BaseSettings):
     EXTREME_RISK_FACTOR: float = 0.5
 
     # ATR expansion filter: current ATR must be > this multiplier * rolling mean ATR
-    ATR_EXPANSION_MULTIPLIER: float = 1.3   # ATR must expand 30% above mean (tightened from 15%)
+    ATR_EXPANSION_MULTIPLIER: float = 1.15  # ATR must expand 15% above mean
 
     # -----------------------------------------------------------------------
     # Confidence scoring (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
-    CONFIDENCE_MIN: float = 2.0             # raised to require stronger confluence
+    CONFIDENCE_MIN: float = 1.5             # moderate confluence requirement
 
     # -----------------------------------------------------------------------
     # Currency exposure control (AGGRESSIVE MODE)
     # -----------------------------------------------------------------------
     # Max number of trades with the same USD directional bias
-    MAX_USD_DIRECTIONAL_TRADES: int = 1
+    MAX_USD_DIRECTIONAL_TRADES: int = 2
     # Map each instrument to the currencies it contains
     CURRENCY_COMPONENTS: Dict[str, List[str]] = {
         "EUR_USD": ["EUR", "USD"],
@@ -111,8 +111,8 @@ class Settings(BaseSettings):
     OANDA_ACCOUNT_ID: str = ""
     OANDA_ENV: str = "practice"
 
-    # Liquidity engine toggle (used by app.py)
-    LIQUIDITY_TRADING_ENABLED: int = 0
+    # Momentum engine toggle (used by app.py)
+    MOMENTUM_TRADING_ENABLED: int = 1
 
 
     # Defaults

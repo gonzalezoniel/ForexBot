@@ -32,29 +32,29 @@ async def _background_loop():
     )
     await asyncio.sleep(5)
     while True:
-        # --- Liquidity engine ---
+        # --- Trend Momentum engine ---
         try:
-            broker = get_liquidity_broker()
+            broker = get_momentum_broker()
             oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-            enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+            enabled = os.getenv("MOMENTUM_TRADING_ENABLED", "1").strip() == "1"
             execute_trades = bool(enabled and oanda_env in {"practice", "live"})
 
             result = forexbot_core.run_tick(
                 broker_client=broker,
-                balance=float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000")),
-                risk_pct_per_trade=float(os.getenv("LIQUIDITY_RISK_PCT", "0.5")),
+                balance=float(os.getenv("MOMENTUM_PAPER_BALANCE", "10000")),
+                risk_pct_per_trade=float(os.getenv("MOMENTUM_RISK_PCT", "0.5")),
                 execute_trades=execute_trades,
-                max_units_fx=int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000")),
-                max_units_xau=int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20")),
+                max_units_fx=int(os.getenv("MOMENTUM_MAX_UNITS_FX", "2000")),
+                max_units_xau=int(os.getenv("MOMENTUM_MAX_UNITS_XAU", "20")),
             )
-            _push_recent(RECENT_LIQUIDITY, result, max_len=25)
+            _push_recent(RECENT_MOMENTUM, result, max_len=25)
             for o in result.get("orders", []):
-                _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+                _push_recent(RECENT_MOMENTUM_TRADES, o, max_len=25)
             sigs = len(result.get("signals", []))
             ords = len(result.get("orders", []))
-            logger.info("[Liquidity] signals=%d orders=%d", sigs, ords)
+            logger.info("[Momentum] signals=%d orders=%d", sigs, ords)
         except Exception:
-            logger.exception("Liquidity tick failed")
+            logger.exception("Momentum tick failed")
 
         # --- ChaosFX engine ---
         try:
@@ -104,18 +104,18 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(
-    title="ForexBot – Liquidity + ChaosFX",
-    version="1.2.3",
+    title="ForexBot – Momentum + ChaosFX",
+    version="2.0.0",
     description=(
         "Forex bot combining: "
-        "Liquidity Sweep (EURGBP/XAUUSD/GBPCAD HTF bias + 5M sweeps) + "
+        "Trend Momentum (EURGBP/XAUUSD/GBPCAD EMA trend + RSI momentum + pullback entries) + "
         "ChaosEngine-FX (volatility/confidence execution)."
     ),
     lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
-# Minimal shared types for the liquidity engine brokers
+# Minimal shared types for the momentum engine brokers
 # (local versions – we no longer import these from forexbot_core)
 # ---------------------------------------------------------------------------
 
@@ -137,7 +137,7 @@ class BrokerClient:
 
 
 # ---------------------------------------------------------------------------
-# Broker implementations (Liquidity engine uses this)
+# Broker implementations (Momentum engine uses this)
 # ---------------------------------------------------------------------------
 
 class OandaBroker(BrokerClient):
@@ -438,22 +438,20 @@ class OandaBroker(BrokerClient):
         return {"status": "ok", "raw": data, "closed_trades": closed}
 
 
-def get_liquidity_broker() -> OandaBroker:
+def get_momentum_broker() -> OandaBroker:
     """
-    HARD REQUIREMENT:
-    Liquidity engine must use OANDA. No DummyBroker fallback.
-    This prevents silent 'it ran but didn't trade' behavior.
+    Momentum engine must use OANDA. No fallback.
     """
     api_key = os.getenv("OANDA_API_KEY", "").strip()
     account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
 
     if not api_key or not account_id:
         raise RuntimeError(
-            "Liquidity requires OANDA. Missing OANDA_API_KEY or OANDA_ACCOUNT_ID in environment."
+            "Momentum engine requires OANDA. Missing OANDA_API_KEY or OANDA_ACCOUNT_ID in environment."
         )
 
     broker = OandaBroker()
-    logger.info("LiquidityBroker: Using OandaBroker (env=%s)", broker.env)
+    logger.info("MomentumBroker: Using OandaBroker (env=%s)", broker.env)
     return broker
 
 
@@ -475,8 +473,8 @@ def get_chaos_engine() -> ChaosEngineFX:
 # In-memory dashboard state
 # ---------------------------------------------------------------------------
 
-RECENT_LIQUIDITY: List[Dict[str, Any]] = []
-RECENT_LIQUIDITY_TRADES: List[Dict[str, Any]] = []
+RECENT_MOMENTUM: List[Dict[str, Any]] = []
+RECENT_MOMENTUM_TRADES: List[Dict[str, Any]] = []
 
 
 def _push_recent(buf: List[Dict[str, Any]], item: Dict[str, Any], max_len: int = 25):
@@ -493,7 +491,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>ForexBot – Liquidity + ChaosFX</title>
+  <title>ForexBot – Momentum + ChaosFX</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body {
@@ -595,28 +593,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
   <div class="wrap">
     <div class="badge"><span class="dot"></span><span>Engines online</span></div>
-    <h1>ForexBot – Liquidity + ChaosFX</h1>
+    <h1>ForexBot – Momentum + ChaosFX</h1>
     <p class="sub">
-      Left: Liquidity Sweep (EURGBP · XAUUSD · GBPCAD · 4H/1H → 5M sweeps + BOS)<br/>
+      Left: Trend Momentum (EURGBP · XAUUSD · GBPCAD · 4H EMA trend + 1H RSI + 5M pullback entries)<br/>
       Right: ChaosEngine-FX (multi-pair volatility & confidence-based execution).
     </p>
 
     <div class="grid">
       <div class="card">
-        <h2 class="title">Liquidity Sweep Engine</h2>
-        <p class="desc">HTF trend bias from 4H / 1H. Entries on 5M liquidity sweeps with BOS, RR tuned for higher hit rate.</p>
+        <h2 class="title">Trend Momentum Engine</h2>
+        <p class="desc">4H EMA trend + 1H RSI momentum confirmation. Entries on 5M pullbacks with reversal candle patterns.</p>
         <div class="row">
           <span class="pill">Pairs: EURGBP · XAUUSD · GBPCAD</span>
-          <span class="pill" id="liq-mode">Mode: …</span>
+          <span class="pill" id="mom-mode">Mode: …</span>
         </div>
 
         <div class="label">CONTROLS</div>
-        <button id="liq-btn">Run Liquidity Tick ⚡</button>
-        <div id="liq-status" class="status"></div>
+        <button id="mom-btn">Run Momentum Tick ⚡</button>
+        <div id="mom-status" class="status"></div>
 
-        <div class="label">RECENT LIQUIDITY</div>
+        <div class="label">RECENT MOMENTUM</div>
         <div class="hr"></div>
-        <pre id="liq-recent">Loading…</pre>
+        <pre id="mom-recent">Loading…</pre>
 
         <div class="small">Docs: <a href="/docs" target="_blank">/docs</a> · Health: <a href="/health" target="_blank">/health</a></div>
       </div>
@@ -670,15 +668,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div style="font-size:0.85rem; color:#9ca3af; line-height:1.6;">
         <strong style="color:#e5e7eb;">Position Boost:</strong> When social sentiment <em>aligns</em> with trade direction (confidence &ge; 50%), size is increased by up to 25%.<br/>
         <strong style="color:#e5e7eb;">Position Cut:</strong> When sentiment <em>conflicts</em> (confidence &ge; 40%), size is reduced by up to 30%.<br/>
-        <strong style="color:#e5e7eb;">Trade Block:</strong> If sentiment <em>strongly conflicts</em> (confidence &ge; 60%), the trade is blocked entirely.
+        <strong style="color:#e5e7eb;">Trade Block:</strong> If sentiment <em>strongly conflicts</em> (confidence &ge; 70%), the trade is blocked entirely.
       </div>
     </div>
 
     <script>
-      const liqBtn = document.getElementById("liq-btn");
-      const liqStatus = document.getElementById("liq-status");
-      const liqRecent = document.getElementById("liq-recent");
-      const liqMode = document.getElementById("liq-mode");
+      const momBtn = document.getElementById("mom-btn");
+      const momStatus = document.getElementById("mom-status");
+      const momRecent = document.getElementById("mom-recent");
+      const momMode = document.getElementById("mom-mode");
 
       const cxBtn = document.getElementById("cx-btn");
       const cxStatus = document.getElementById("cx-status");
@@ -769,9 +767,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       async function refresh() {
         try {
-          const liq = await fetch("/api/liquidity/recent").then(r => r.json());
-          liqMode.textContent = liq.mode || "Mode: …";
-          liqRecent.textContent = liq.text || "No liquidity runs yet.";
+          const mom = await fetch("/api/momentum/recent").then(r => r.json());
+          momMode.textContent = mom.mode || "Mode: …";
+          momRecent.textContent = mom.text || "No momentum runs yet.";
 
           const cx = await fetch("/api/chaosfx/status").then(r => r.json());
           cxSummary.textContent = cx.summary_text || "No runs yet.";
@@ -782,17 +780,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         await refreshSocial();
       }
 
-      liqBtn.addEventListener("click", async () => {
-        liqStatus.textContent = "Running liquidity tick…";
-        liqBtn.disabled = true;
+      momBtn.addEventListener("click", async () => {
+        momStatus.textContent = "Running momentum tick…";
+        momBtn.disabled = true;
         try {
-          const res = await fetch("/api/liquidity/tick", { method: "POST" });
+          const res = await fetch("/api/momentum/tick", { method: "POST" });
           const data = await res.json();
-          liqStatus.textContent = data.note || "Done.";
+          momStatus.textContent = data.note || "Done.";
         } catch (e) {
-          liqStatus.textContent = "Error running tick. Check logs.";
+          momStatus.textContent = "Error running tick. Check logs.";
         } finally {
-          liqBtn.disabled = false;
+          momBtn.disabled = false;
           refresh();
         }
       });
@@ -849,28 +847,28 @@ async def health():
     return JSONResponse({"status": "healthy"})
 
 
-# ---------------------------- Liquidity API -------------------------------
+# ---------------------------- Momentum API ---------------------------------
 
-@app.post("/api/liquidity/tick", response_class=JSONResponse)
-async def liquidity_tick():
+@app.post("/api/momentum/tick", response_class=JSONResponse)
+async def momentum_tick():
     """
-    Runs Liquidity engine once.
-    If LIQUIDITY_TRADING_ENABLED=1, it will place trades against the configured
+    Runs Trend Momentum engine once.
+    If MOMENTUM_TRADING_ENABLED=1, it will place trades against the configured
     OANDA_ENV (practice or live).
     """
     try:
-        broker = get_liquidity_broker()
+        broker = get_momentum_broker()
     except Exception as e:
         return JSONResponse(
             status_code=500,
             content={
                 "status": "error",
-                "note": f"Liquidity broker error: {str(e)}",
+                "note": f"Momentum broker error: {str(e)}",
             },
         )
 
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+    enabled = os.getenv("MOMENTUM_TRADING_ENABLED", "1").strip() == "1"
 
     if enabled and oanda_env not in {"practice", "live"}:
         return JSONResponse(
@@ -883,10 +881,10 @@ async def liquidity_tick():
 
     execute_trades = bool(enabled and oanda_env in {"practice", "live"})
 
-    balance = float(os.getenv("LIQUIDITY_PAPER_BALANCE", "10000"))
-    risk_pct = float(os.getenv("LIQUIDITY_RISK_PCT", "0.5"))
-    max_units_fx = int(os.getenv("LIQUIDITY_MAX_UNITS_FX", "2000"))
-    max_units_xau = int(os.getenv("LIQUIDITY_MAX_UNITS_XAU", "20"))
+    balance = float(os.getenv("MOMENTUM_PAPER_BALANCE", "10000"))
+    risk_pct = float(os.getenv("MOMENTUM_RISK_PCT", "0.5"))
+    max_units_fx = int(os.getenv("MOMENTUM_MAX_UNITS_FX", "2000"))
+    max_units_xau = int(os.getenv("MOMENTUM_MAX_UNITS_XAU", "20"))
 
     result = forexbot_core.run_tick(
         broker_client=broker,
@@ -897,9 +895,9 @@ async def liquidity_tick():
         max_units_xau=max_units_xau,
     )
 
-    _push_recent(RECENT_LIQUIDITY, result, max_len=25)
+    _push_recent(RECENT_MOMENTUM, result, max_len=25)
     for o in result.get("orders", []):
-        _push_recent(RECENT_LIQUIDITY_TRADES, o, max_len=25)
+        _push_recent(RECENT_MOMENTUM_TRADES, o, max_len=25)
 
     signals_count = len(result.get("signals", []))
     planned_count = len(result.get("planned_orders", []))
@@ -929,25 +927,25 @@ async def liquidity_tick():
     )
 
 
-@app.get("/api/liquidity/recent", response_class=JSONResponse)
-async def liquidity_recent():
+@app.get("/api/momentum/recent", response_class=JSONResponse)
+async def momentum_recent():
     oanda_env = os.getenv("OANDA_ENV", "practice").strip().lower()
-    enabled = os.getenv("LIQUIDITY_TRADING_ENABLED", "0").strip() == "1"
+    enabled = os.getenv("MOMENTUM_TRADING_ENABLED", "1").strip() == "1"
     mode = (
         f"Mode: Execution enabled ({oanda_env})"
         if (enabled and oanda_env in {"practice", "live"})
         else "Mode: Signals only"
     )
 
-    if not RECENT_LIQUIDITY:
+    if not RECENT_MOMENTUM:
         return JSONResponse(
             {
                 "mode": mode,
-                "text": "No liquidity runs yet. Click 'Run Liquidity Tick'.",
+                "text": "No momentum runs yet. Click 'Run Momentum Tick'.",
             }
         )
 
-    last = RECENT_LIQUIDITY[-1]
+    last = RECENT_MOMENTUM[-1]
     ts = last.get("timestamp", "")
     sigs = last.get("signals", [])
     planned = last.get("planned_orders", [])
