@@ -5,11 +5,11 @@ import os
 import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, List, Dict, Set
+from typing import Any, List, Dict
 
 import social_signals
 
-logger = logging.getLogger("forexbot.liquidity")
+logger = logging.getLogger("forexbot.momentum")
 
 # Social signal configuration
 _SOCIAL_SENTIMENT_BLOCK_ENABLED = os.getenv("SOCIAL_SENTIMENT_BLOCK", "1").strip() == "1"
@@ -43,7 +43,7 @@ def _is_forex_market_open(now_utc: datetime) -> bool:
 
     return True
 
-from liquidity_sweep_strategy import (
+from trend_momentum_strategy import (
     MarketDataInterface,
     Candle,
     Signal,
@@ -51,7 +51,7 @@ from liquidity_sweep_strategy import (
     Symbol,
 )
 
-SYMBOL_COOLDOWN_SECONDS = 600  # 10 min cooldown (increased from 5 min to reduce overtrading)
+SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown between trades on same pair
 _last_order_time: Dict[str, float] = {}
 
 
@@ -63,9 +63,9 @@ class Quote:
 
 class BrokerClient:
     """
-    Minimal interface for a broker used by the liquidity strategy.
+    Minimal interface for a broker used by the trend momentum strategy.
 
-    Your concrete broker (DummyBroker / OandaBroker in app.py) must implement:
+    Your concrete broker (OandaBroker in app.py) must implement:
 
       - get_ohlc(symbol, timeframe, limit) -> List[dict]
       - get_quote(symbol) -> Quote
@@ -154,7 +154,7 @@ def run_tick(
     max_units_xau: int = 20,
 ) -> Dict[str, Any]:
     """
-    Main entrypoint for the Liquidity Sweep engine.
+    Main entrypoint for the Trend Momentum engine.
 
     - Wraps your broker in MyMarket
     - Calls generate_signals(...)
@@ -162,7 +162,7 @@ def run_tick(
     - Returns a summary dict used by the dashboard.
 
     Args:
-        broker_client: concrete broker implementation (DummyBroker or OandaBroker).
+        broker_client: concrete broker implementation (OandaBroker).
         balance: virtual account balance used for risk sizing.
         risk_pct_per_trade: percent risk per trade (e.g. 0.5 = 0.5%).
         execute_trades: if True, send orders via broker_client.
@@ -181,13 +181,13 @@ def run_tick(
 
     # --- Market hours guard ---
     if not _is_forex_market_open(now):
-        logger.info("Liquidity: forex market is closed (weekend), skipping tick.")
+        logger.info("Momentum: forex market is closed (weekend), skipping tick.")
         return {"timestamp": now.isoformat(), "signals": [], "planned_orders": [], "orders": []}
 
     signals: List[Signal] = generate_signals(market, now)
 
     if not signals:
-        logger.info("Liquidity: no signals.")
+        logger.info("Momentum: no signals.")
         return {"timestamp": now.isoformat(), "signals": [], "planned_orders": [], "orders": []}
 
     signals_out: List[Dict[str, Any]] = []
@@ -219,18 +219,18 @@ def run_tick(
                 social_alignment = "neutral"
 
             logger.info(
-                "LIQ SOCIAL: %s sentiment=%s confidence=%.2f mentions=%d alignment=%s",
+                "MOMENTUM SOCIAL: %s sentiment=%s confidence=%.2f mentions=%d alignment=%s",
                 sig.symbol, social_sentiment, social_confidence, social_mentions, social_alignment,
             )
 
-            # Block trade if social sentiment strongly conflicts (confidence > 0.6)
+            # Block trade if social sentiment strongly conflicts (confidence > 0.7)
             if (
                 _SOCIAL_SENTIMENT_BLOCK_ENABLED
                 and social_alignment == "conflicting"
-                and social_confidence >= 0.6
+                and social_confidence >= 0.7
             ):
                 logger.info(
-                    "Liquidity: BLOCKED %s %s — social sentiment strongly %s (conf=%.2f)",
+                    "Momentum: BLOCKED %s %s -- social sentiment strongly %s (conf=%.2f)",
                     sig.symbol, sig.side, social_sentiment, social_confidence,
                 )
                 signals_out.append(
@@ -250,7 +250,7 @@ def run_tick(
                 continue
 
         logger.info(
-            "LIQ SIGNAL: %s %s entry=%.5f SL=%.5f TP=%.5f RR=%s | %s",
+            "MOMENTUM SIGNAL: %s %s entry=%.5f SL=%.5f TP=%.5f RR=%s | %s",
             sig.symbol, sig.side.upper(), sig.entry, sig.stop_loss,
             sig.take_profit, sig.rr, sig.comment,
         )
@@ -291,20 +291,20 @@ def run_tick(
             boost = 1.0 + (_SOCIAL_SIZE_BOOST_PCT / 100.0)
             size *= boost
             logger.info(
-                "Liquidity: BOOSTED size for %s by %.0f%% (social aligned, conf=%.2f)",
+                "Momentum: BOOSTED size for %s by %.0f%% (social aligned, conf=%.2f)",
                 sig.symbol, _SOCIAL_SIZE_BOOST_PCT, social_confidence,
             )
         elif social_alignment == "conflicting" and social_confidence >= 0.4:
             cut = 1.0 - (_SOCIAL_SIZE_CUT_PCT / 100.0)
             size *= cut
             logger.info(
-                "Liquidity: REDUCED size for %s by %.0f%% (social conflicting, conf=%.2f)",
+                "Momentum: REDUCED size for %s by %.0f%% (social conflicting, conf=%.2f)",
                 sig.symbol, _SOCIAL_SIZE_CUT_PCT, social_confidence,
             )
 
         units = int(size)
         if units <= 0:
-            logger.info("Liquidity: size <= 0 for %s, skip order.", sig.symbol)
+            logger.info("Momentum: size <= 0 for %s, skip order.", sig.symbol)
             continue
 
         if units > max_units:
@@ -315,7 +315,7 @@ def run_tick(
         last_ts = _last_order_time.get(sig.symbol, 0.0)
         if now_ts - last_ts < SYMBOL_COOLDOWN_SECONDS:
             logger.info(
-                "Liquidity: %s still in cooldown (%ds remaining), skip.",
+                "Momentum: %s still in cooldown (%ds remaining), skip.",
                 sig.symbol, int(SYMBOL_COOLDOWN_SECONDS - (now_ts - last_ts)),
             )
             continue
@@ -327,7 +327,7 @@ def run_tick(
             signed_units = abs(units)
 
         logger.info(
-            "Liquidity: computed units=%d for %s risk=%.1f%%",
+            "Momentum: computed units=%d for %s risk=%.1f%%",
             signed_units, sig.symbol, risk_pct_per_trade,
         )
 
@@ -343,22 +343,18 @@ def run_tick(
         }
         planned_out.append(plan_payload)
 
-        # --- FIFO: check for existing open trades on this instrument ---
-        # Both Liquidity and ChaosFX share the same OANDA account.
-        # Skip if there's already an open trade on this instrument to avoid
-        # duplicate positions that trigger FIFO errors.
-        if execute_trades and hasattr(broker_client, "get_open_trades"):
+        # --- FIFO: check for existing same-direction trade ---
+        if execute_trades and hasattr(broker_client, "has_same_direction_trade"):
             try:
                 instrument = broker_client._instrument(sig.symbol)
-                existing = broker_client.get_open_trades(instrument)
-                if existing:
+                if broker_client.has_same_direction_trade(instrument, sig.side):
                     logger.info(
-                        "Liquidity: %s already has %d open trade(s), skipping to avoid FIFO conflict.",
-                        sig.symbol, len(existing),
+                        "Momentum: %s already has same-direction trade open, skipping.",
+                        sig.symbol,
                     )
                     continue
             except Exception as e:
-                logger.warning("Liquidity: open-trade check failed for %s: %s", sig.symbol, e)
+                logger.warning("Momentum: FIFO check failed for %s: %s", sig.symbol, e)
 
         order_resp: Any = None
         if execute_trades:
@@ -372,7 +368,7 @@ def run_tick(
                     take_profit=float(sig.take_profit),
                 )
                 logger.info(
-                    "Liquidity: order sent for %s, response=%s",
+                    "Momentum: order sent for %s, response=%s",
                     sig.symbol, order_resp,
                 )
                 _last_order_time[sig.symbol] = _time.monotonic()
@@ -385,7 +381,7 @@ def run_tick(
             except Exception as e:
                 order_resp = {"status": "error", "detail": str(e)}
                 logger.exception(
-                    "Liquidity: ERROR placing order for %s", sig.symbol,
+                    "Momentum: ERROR placing order for %s", sig.symbol,
                 )
                 # Set cooldown on failure too so we don't spam rejected orders
                 _last_order_time[sig.symbol] = _time.monotonic()
@@ -397,7 +393,7 @@ def run_tick(
                 )
         else:
             logger.info(
-                "Liquidity: execute_trades=False, order NOT sent for %s.",
+                "Momentum: execute_trades=False, order NOT sent for %s.",
                 sig.symbol,
             )
 
