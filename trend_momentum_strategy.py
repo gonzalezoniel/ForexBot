@@ -83,40 +83,40 @@ class PairConfig:
 
 PAIR_CONFIG: Dict[Symbol, PairConfig] = {
     "EURGBP": PairConfig(
-        max_spread_pips=3.0,
+        max_spread_pips=4.0,
         atr_sl_multiplier=1.5,
-        min_rr=2.0,
+        min_rr=1.5,
         max_rr=3.0,
-        min_atr_pips=3.0,
-        pullback_atr_ratio=1.2,
-        rsi_long_min=40.0,
-        rsi_long_max=70.0,
-        rsi_short_min=30.0,
-        rsi_short_max=60.0,
+        min_atr_pips=1.5,
+        pullback_atr_ratio=2.0,
+        rsi_long_min=35.0,
+        rsi_long_max=75.0,
+        rsi_short_min=25.0,
+        rsi_short_max=65.0,
     ),
     "XAUUSD": PairConfig(
-        max_spread_pips=40.0,
+        max_spread_pips=50.0,
         atr_sl_multiplier=1.5,
-        min_rr=2.0,
+        min_rr=1.5,
         max_rr=3.0,
-        min_atr_pips=100.0,  # XAU ATR in points (e.g. $1.00 = 100 points at pip=0.01)
-        pullback_atr_ratio=1.2,
-        rsi_long_min=40.0,
-        rsi_long_max=72.0,  # XAU trends hard, allow slightly higher RSI
-        rsi_short_min=28.0,
-        rsi_short_max=60.0,
+        min_atr_pips=50.0,
+        pullback_atr_ratio=2.0,
+        rsi_long_min=35.0,
+        rsi_long_max=78.0,  # XAU trends hard, allow higher RSI
+        rsi_short_min=22.0,
+        rsi_short_max=65.0,
     ),
     "GBPCAD": PairConfig(
-        max_spread_pips=4.5,
+        max_spread_pips=6.0,
         atr_sl_multiplier=1.5,
-        min_rr=2.0,
+        min_rr=1.5,
         max_rr=3.0,
-        min_atr_pips=4.0,
-        pullback_atr_ratio=1.2,
-        rsi_long_min=40.0,
-        rsi_long_max=70.0,
-        rsi_short_min=30.0,
-        rsi_short_max=60.0,
+        min_atr_pips=2.0,
+        pullback_atr_ratio=2.0,
+        rsi_long_min=35.0,
+        rsi_long_max=75.0,
+        rsi_short_min=25.0,
+        rsi_short_max=65.0,
     ),
 }
 
@@ -142,41 +142,41 @@ def _ema(values: List[float], period: int) -> List[float]:
 
 
 def _rsi(closes: List[float], period: int = 14) -> List[float]:
-    """Compute RSI. Returns list of same length (0.0 for insufficient data)."""
-    if len(closes) < period + 1:
-        return [50.0] * len(closes)
+    """Compute RSI. Returns list of same length as *closes* (padded with 50.0)."""
+    n = len(closes)
+    if n < period + 1:
+        return [50.0] * n
 
-    result: List[float] = [50.0] * period  # pad initial
+    result: List[float] = [50.0] * (period)  # pad first `period` entries
     gains: List[float] = []
     losses: List[float] = []
 
-    for i in range(1, len(closes)):
+    for i in range(1, n):
         delta = closes[i] - closes[i - 1]
         gains.append(max(delta, 0.0))
         losses.append(max(-delta, 0.0))
 
-    # Initial average
+    # Initial averages from first `period` deltas
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
-    for i in range(period, len(gains)):
-        if i == period:
-            # First RSI value
-            if avg_loss == 0:
-                result.append(100.0)
-            else:
-                rs = avg_gain / avg_loss
-                result.append(100.0 - 100.0 / (1.0 + rs))
-        else:
-            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-            if avg_loss == 0:
-                result.append(100.0)
-            else:
-                rs = avg_gain / avg_loss
-                result.append(100.0 - 100.0 / (1.0 + rs))
+    # RSI at index `period` (corresponds to closes[period])
+    if avg_loss == 0:
+        result.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        result.append(100.0 - 100.0 / (1.0 + rs))
 
-    # First RSI at index=period was already appended; pad if needed
+    # Smoothed RSI for remaining bars
+    for i in range(period + 1, len(gains) + 1):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
+        if avg_loss == 0:
+            result.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            result.append(100.0 - 100.0 / (1.0 + rs))
+
     return result
 
 
@@ -225,18 +225,18 @@ def _compute_trend_4h(candles_4h: List[Candle]) -> str:
     ema21 = _ema(closes, 21)
     ema55 = _ema(closes, 55)
 
-    # Check the last 3 candles for consistent trend
+    # Check the last 2 candles for consistent trend (relaxed from 3)
     bullish_count = 0
     bearish_count = 0
-    for i in range(-3, 0):
+    for i in range(-2, 0):
         if ema21[i] > ema55[i]:
             bullish_count += 1
         elif ema21[i] < ema55[i]:
             bearish_count += 1
 
-    if bullish_count == 3:
+    if bullish_count == 2:
         return "bullish"
-    if bearish_count == 3:
+    if bearish_count == 2:
         return "bearish"
     return "flat"
 
@@ -305,10 +305,9 @@ def _is_bullish_pin_bar(candle: Candle) -> bool:
     upper_wick = candle.high - max(candle.open, candle.close)
     body = abs(candle.close - candle.open)
     return (
-        lower_wick > 1.5 * body
-        and lower_wick > 0.5 * rng
-        and upper_wick < 0.3 * rng
-        and candle.close >= candle.open  # closes green
+        lower_wick > 1.0 * body
+        and lower_wick > 0.35 * rng
+        and upper_wick < 0.4 * rng
     )
 
 
@@ -321,10 +320,9 @@ def _is_bearish_pin_bar(candle: Candle) -> bool:
     lower_wick = min(candle.open, candle.close) - candle.low
     body = abs(candle.close - candle.open)
     return (
-        upper_wick > 1.5 * body
-        and upper_wick > 0.5 * rng
-        and lower_wick < 0.3 * rng
-        and candle.close <= candle.open  # closes red
+        upper_wick > 1.0 * body
+        and upper_wick > 0.35 * rng
+        and lower_wick < 0.4 * rng
     )
 
 
@@ -335,7 +333,7 @@ def _is_bullish_hammer(candle: Candle) -> bool:
         return False
     lower_wick = min(candle.open, candle.close) - candle.low
     body = abs(candle.close - candle.open)
-    return lower_wick > 1.2 * body and lower_wick > 0.4 * rng
+    return lower_wick > 0.8 * body and lower_wick > 0.3 * rng
 
 
 def _is_bearish_shooting_star(candle: Candle) -> bool:
@@ -345,7 +343,25 @@ def _is_bearish_shooting_star(candle: Candle) -> bool:
         return False
     upper_wick = candle.high - max(candle.open, candle.close)
     body = abs(candle.close - candle.open)
-    return upper_wick > 1.2 * body and upper_wick > 0.4 * rng
+    return upper_wick > 0.8 * body and upper_wick > 0.3 * rng
+
+
+def _is_bullish_momentum(candle: Candle) -> bool:
+    """Strong green candle — close well above open with decent body."""
+    rng = candle.high - candle.low
+    if rng <= 0:
+        return False
+    body = candle.close - candle.open
+    return body > 0 and body > 0.5 * rng
+
+
+def _is_bearish_momentum(candle: Candle) -> bool:
+    """Strong red candle — close well below open with decent body."""
+    rng = candle.high - candle.low
+    if rng <= 0:
+        return False
+    body = candle.open - candle.close
+    return body > 0 and body > 0.5 * rng
 
 
 def _detect_pullback_entry(
@@ -354,8 +370,8 @@ def _detect_pullback_entry(
     cfg: PairConfig,
 ) -> Optional[Side]:
     """
-    Check if the last few 5M candles show a pullback to EMA(21) with a
-    reversal candle in the trend direction.
+    Check if any of the last 3 completed 5M candles show a pullback to
+    EMA(21) with a reversal or momentum candle in the trend direction.
 
     Returns 'long', 'short', or None.
     """
@@ -370,38 +386,45 @@ def _detect_pullback_entry(
     if current_atr <= 0:
         return None
 
-    last = candles_5m[-1]
-    prev = candles_5m[-2]
-    current_ema = ema21[-1]
-
-    # How close is price to the EMA? Must be within pullback_atr_ratio * ATR
-    distance_to_ema = abs(last.close - current_ema)
     max_distance = cfg.pullback_atr_ratio * current_atr
 
-    if distance_to_ema > max_distance:
-        return None
+    # Scan the last 3 candles for a valid entry pattern
+    for offset in range(1, 4):  # -1, -2, -3
+        idx = len(candles_5m) - offset
+        if idx < 1:
+            break
 
-    if trend == "bullish":
-        # Price should be near or just below EMA (pullback), then reverse up
-        has_reversal = (
-            _is_bullish_engulfing(last, prev)
-            or _is_bullish_pin_bar(last)
-            or _is_bullish_hammer(last)
-        )
-        # Price pulled back close to EMA from above — or touched it
-        pulled_back = last.low <= current_ema * 1.002  # within 0.2% of EMA
-        if has_reversal and pulled_back:
-            return "long"
+        candle = candles_5m[idx]
+        prev_candle = candles_5m[idx - 1]
+        ema_at = ema21[idx]
 
-    elif trend == "bearish":
-        has_reversal = (
-            _is_bearish_engulfing(last, prev)
-            or _is_bearish_pin_bar(last)
-            or _is_bearish_shooting_star(last)
-        )
-        pulled_back = last.high >= current_ema * 0.998
-        if has_reversal and pulled_back:
-            return "short"
+        # How close is this candle to the EMA?
+        distance_to_ema = abs(candle.close - ema_at)
+        if distance_to_ema > max_distance:
+            continue
+
+        if trend == "bullish":
+            has_reversal = (
+                _is_bullish_engulfing(candle, prev_candle)
+                or _is_bullish_pin_bar(candle)
+                or _is_bullish_hammer(candle)
+                or _is_bullish_momentum(candle)
+            )
+            # Price pulled back close to EMA from above — or touched it
+            pulled_back = candle.low <= ema_at * 1.005  # within 0.5% of EMA
+            if has_reversal and pulled_back:
+                return "long"
+
+        elif trend == "bearish":
+            has_reversal = (
+                _is_bearish_engulfing(candle, prev_candle)
+                or _is_bearish_pin_bar(candle)
+                or _is_bearish_shooting_star(candle)
+                or _is_bearish_momentum(candle)
+            )
+            pulled_back = candle.high >= ema_at * 0.995
+            if has_reversal and pulled_back:
+                return "short"
 
     return None
 
