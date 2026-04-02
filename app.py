@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+import httpx
 import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -76,6 +77,15 @@ async def _background_loop():
             )
         except Exception:
             logger.exception("Social signal fetch failed")
+
+        # --- Self-ping to keep Render instance alive ---
+        try:
+            ping_url = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:10000")
+            async with httpx.AsyncClient() as http_client:
+                resp = await http_client.get(f"{ping_url}/health", timeout=10)
+                logger.info("[KeepAlive] pinged %s/health -> %s", ping_url, resp.status_code)
+        except Exception:
+            logger.debug("[KeepAlive] self-ping failed (non-critical)")
 
         await asyncio.sleep(SCHEDULER_INTERVAL)
 
